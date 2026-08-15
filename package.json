@@ -34,6 +34,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Isilsolme/dsh-splash-launcher.git"
+    "url": "git+https://github.com/Isilsolme/dsh-splash-launcher.git"
   }
 }
