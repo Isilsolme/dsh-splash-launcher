@@ -1,0 +1,6 @@
+# dsh-splash-launcher bundle patch: inserts the host plugin row into the
+# profile roster. Install with:
+#   dsh plugin --profile web add dsh-splash-launcher
+- insert:
+    - id: splash-launcher
+      name: 'dsh-splash-launcher'

@@ -55,6 +55,16 @@ build.cmd
 2. 运行 `DSH-GUI.exe`；
 3. 如需桌面快捷方式：右键 `DSH-GUI.exe` → 发送到 → 桌面快捷方式（图标会自动使用黑鲸）。
 
+### 作为 dsh 插件安装（可选）
+
+本项目同时是一个可安装的 dsh bundle：随包携带 `DSH-GUI.exe`，并在宿主机注册 `desktop_launch` 工具，在对话中直接让 agent 打开带动画的 GUI 窗口：
+
+```sh
+dsh plugin --profile web add dsh-splash-launcher
+```
+
+安装后重启 `dsh web`，agent 可使用 `desktop_launch` 工具（参数 `workspace` 可选，指定会话工作目录）。
+
 ### 配置
 
 | 项 | 默认值 | 修改方式 |
