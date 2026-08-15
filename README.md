@@ -6,6 +6,16 @@
 
 ![license](https://img.shields.io/badge/license-MIT-blue) ![windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
 
+## 效果截图
+
+**启动动画（WPF 无边框，HARNESS 逐笔描边）**
+
+![启动动画](docs/screenshots/startup-animation.png)
+
+**进入后的 GUI 界面**
+
+![GUI 界面](docs/screenshots/gui.png)
+
 ---
 
 ## 功能特性
