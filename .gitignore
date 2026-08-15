@@ -6,3 +6,4 @@ backup-*/
 *.log
 *.tmp
 .vs/
+dsh-splash-launcher-v*.zip
