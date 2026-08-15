@@ -16,19 +16,33 @@ jobs:
         shell: cmd
         run: build.cmd
 
-      - name: Self test
+      - name: Self test (validates embedded assets + dsh resolution)
         shell: cmd
         run: DSH-GUI.exe --selftest
 
-      - name: Upload build folder
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $ver = $env:GITHUB_REF -replace '^refs/tags/', ''
+          if ($ver -eq $env:GITHUB_REF) { $ver = "v$($env:GITHUB_RUN_NUMBER)-dev" }
+          $zip = "dsh-splash-launcher-$ver.zip"
+          Compress-Archive -Path DSH-GUI.exe, README.md, README.en.md, LICENSE -DestinationPath $zip -Force
+          Write-Host "portable zip: $zip"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dsh-gui
-          path: .
+          path: |
+            DSH-GUI.exe
+            dsh-splash-launcher-*.zip
+            selftest.txt
           if-no-files-found: error
 
       - name: Publish release on tag
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: DSH-GUI.exe
+          files: |
+            DSH-GUI.exe
+            dsh-splash-launcher-*.zip

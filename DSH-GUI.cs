@@ -28,12 +28,12 @@ namespace DshGui
 {
     public static class Program
     {
-        static string Workspace = @"D:\VSCode";
+        static string Workspace = "";
         static int Port = 3080;
         static string Url = "http://127.0.0.1:3080";
         const string SplashStyle = ""; // "&logo=draw" 可切换鲸鱼描边版式
 
-        static readonly string AppDir = AppDomain.CurrentDomain.BaseDirectory;
+        internal static readonly string AppDir = AppDomain.CurrentDomain.BaseDirectory;
         static readonly string BaseDir = IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DSH-GUI");
         static readonly string ProfileDir = IOPath.Combine(BaseDir, "profile");
         static readonly string LogFile = IOPath.Combine(BaseDir, "launcher.log");
@@ -45,6 +45,7 @@ namespace DshGui
         static string DshBin = "";
         static string DistDir = "";
         static bool ServedOk = false;
+        static string LastServerError = null;
         static SplashWindow Splash = null;
         static Application UiApp = null;
         static int ExitCode = 0;
@@ -55,14 +56,16 @@ namespace DshGui
 
         static void LoadConfig()
         {
-            // 工作目录：环境变量 DSH_GUI_WORKSPACE > 同目录 workspace.txt > 默认 D:\VSCode
+            // 工作目录：环境变量 DSH_GUI_WORKSPACE > 同目录 workspace.txt > %USERPROFILE%
             string ws = Environment.GetEnvironmentVariable("DSH_GUI_WORKSPACE");
             if (string.IsNullOrEmpty(ws))
             {
                 string cfg = IOPath.Combine(AppDir, "workspace.txt");
                 try { if (File.Exists(cfg)) ws = File.ReadAllText(cfg, Encoding.UTF8).Trim(); } catch { }
             }
-            if (!string.IsNullOrEmpty(ws)) Workspace = ws;
+            if (string.IsNullOrEmpty(ws)) ws = Environment.GetEnvironmentVariable("USERPROFILE");
+            if (string.IsNullOrEmpty(ws)) ws = IOPath.GetTempPath();
+            Workspace = ws;
 
             // 端口：环境变量 DSH_GUI_PORT > 默认 3080
             int p;
@@ -80,7 +83,7 @@ namespace DshGui
             {
                 Directory.CreateDirectory(BaseDir);
                 LoadConfig();
-                Log("start, version 1.2");
+                Log("start, version 1.3");
 
                 if (PortOpen())
                 {
@@ -90,7 +93,7 @@ namespace DshGui
                 }
 
                 // 立刻显示 WPF 即时启动动画；UI 线程只负责动画，后台线程负责启动编排
-                Assets.Load(AppDir);
+                Assets.Load();
                 Rect wa = SystemParameters.WorkArea;
                 WinLeft = (int)(wa.Left + (wa.Width - WinW) / 2);
                 WinTop = (int)(wa.Top + (wa.Height - WinH) / 2);
@@ -185,7 +188,7 @@ namespace DshGui
                 Process server = StartServer();
                 if (server == null)
                 {
-                    UiMessage("无法启动 dsh web（node 或 dsh 未找到）。", "DSH GUI", MessageBoxImage.Error);
+                    UiMessage(LastServerError ?? "无法启动 dsh web（node 或 dsh 未找到）。", "DSH GUI", MessageBoxImage.Error);
                     try { File.Delete(LockFile); } catch { }
                     FinishApp(1);
                     return;
@@ -302,8 +305,24 @@ namespace DshGui
 
         static string FileSplashUrl(string handoff)
         {
-            string file = new Uri(IOPath.Combine(AppDir, "splash.html")).AbsoluteUri;
+            string file = new Uri(IOPath.Combine(SplashDir(), "splash.html")).AbsoluteUri;
             return file + "?target=" + Uri.EscapeDataString(Url) + "&timeout=90&handoff=" + handoff + SplashStyle;
+        }
+
+        static string SplashDir()
+        {
+            // 磁盘同目录素材优先（可自定义动画），否则使用 exe 内嵌资源（便携单文件）
+            if (File.Exists(IOPath.Combine(AppDir, "splash.html"))) return AppDir;
+            string dir = IOPath.Combine(BaseDir, "assets");
+            try
+            {
+                Directory.CreateDirectory(dir);
+                foreach (string f in new[] { "splash.html", "deepseek-wordmark.svg", "whale.png", "whale-anim.svg" })
+                    Assets.ExtractTo(dir, f);
+                Log("assets extracted to " + dir);
+            }
+            catch (Exception ex) { Log("extract assets failed: " + ex.Message); }
+            return dir;
         }
 
         static string RunCapture(string exe, string args)
@@ -385,7 +404,7 @@ namespace DshGui
                 if (string.IsNullOrEmpty(DistDir) || !Directory.Exists(DistDir)) throw new Exception("dist missing");
                 foreach (string f in new[] { "splash.html", "deepseek-wordmark.svg", "whale.png", "whale-anim.svg" })
                 {
-                    File.Copy(IOPath.Combine(AppDir, f), IOPath.Combine(DistDir, f), true);
+                    Assets.ExtractTo(DistDir, f);
                 }
                 ServedOk = true;
                 Log("splash synced to dist");
@@ -397,10 +416,18 @@ namespace DshGui
         {
             try
             {
+                if (!Directory.Exists(Workspace))
+                {
+                    LastServerError = "工作目录不存在：" + Workspace +
+                        "\r\n请在 exe 同目录新建 workspace.txt（或设置环境变量 DSH_GUI_WORKSPACE）指向一个已存在的目录。";
+                    Log("workspace missing: " + Workspace);
+                    return null;
+                }
                 string node = ResolveNodeExe();
                 if (string.IsNullOrEmpty(DshBin) || !File.Exists(DshBin))
                 {
                     Log("node/dsh unavailable, fallback to cmd");
+                    LastServerError = "未在 npm 全局目录找到 @deepseek-ai/dsh，请先执行：npm install -g @deepseek-ai/dsh";
                     ProcessStartInfo fallback = new ProcessStartInfo("cmd.exe", "/c dsh web");
                     fallback.WorkingDirectory = Workspace;
                     fallback.CreateNoWindow = true;
@@ -482,18 +509,21 @@ namespace DshGui
             StringBuilder sb = new StringBuilder();
             try
             {
-                Assets.Load(AppDir);
+                Assets.Load();
                 sb.AppendLine("assets OK: letters=" + Assets.Letters.Count + " wordmark=" + Assets.Wordmark.Count);
+                sb.AppendLine("embedded resources: " + string.Join(",", typeof(Program).Assembly.GetManifestResourceNames()));
                 ResolveDshInstall();
                 sb.AppendLine("dshBin=" + DshBin);
                 sb.AppendLine("dist=" + DistDir);
+                if (string.IsNullOrEmpty(DshBin) || !File.Exists(DshBin))
+                    sb.AppendLine("WARNING: dsh 未找到（npm root -g 解析失败）；请确认已执行 npm install -g @deepseek-ai/dsh");
                 sb.AppendLine("selftest OK");
-                File.WriteAllText(IOPath.Combine(AppDir, "selftest.txt"), sb.ToString(), Encoding.UTF8);
+                try { File.WriteAllText(IOPath.Combine(AppDir, "selftest.txt"), sb.ToString(), Encoding.UTF8); } catch { }
                 return 0;
             }
             catch (Exception ex)
             {
-                sb.AppendLine("selftest FAILED: " + ex);
+                sb.AppendLine("selftest FAILED: " + ex.Message);
                 try { File.WriteAllText(IOPath.Combine(AppDir, "selftest.txt"), sb.ToString(), Encoding.UTF8); } catch { }
                 return 1;
             }
@@ -509,7 +539,35 @@ namespace DshGui
         public static List<List<Geometry>> LetterFigures = new List<List<Geometry>>();
         public static List<List<double>> LetterFigureLengths = new List<List<double>>();
 
-        public static void Load(string dir)
+        // 读取素材：优先 exe 同目录磁盘文件（可自定义），否则使用内嵌资源（便携单文件）
+        public static Stream Open(string name)
+        {
+            string disk = IOPath.Combine(Program.AppDir, name);
+            if (File.Exists(disk)) return File.OpenRead(disk);
+            Stream s = typeof(Program).Assembly.GetManifestResourceStream("DshGui." + name);
+            if (s == null) throw new Exception("asset not found (disk and embedded): " + name);
+            return s;
+        }
+
+        public static string ReadText(string name)
+        {
+            using (Stream s = Open(name))
+            using (StreamReader r = new StreamReader(s, Encoding.UTF8))
+            {
+                return r.ReadToEnd();
+            }
+        }
+
+        public static void ExtractTo(string dir, string name)
+        {
+            using (Stream s = Open(name))
+            using (FileStream fs = new FileStream(IOPath.Combine(dir, name), FileMode.Create, FileAccess.Write))
+            {
+                s.CopyTo(fs);
+            }
+        }
+
+        public static void Load()
         {
             Whale = null;
             Wordmark.Clear();
@@ -518,20 +576,20 @@ namespace DshGui
             LetterFigures.Clear();
             LetterFigureLengths.Clear();
 
-            string whaleSvg = File.ReadAllText(IOPath.Combine(dir, "whale-anim.svg"));
+            string whaleSvg = ReadText("whale-anim.svg");
             Match wm = Regex.Match(whaleSvg, "<path class=\"ink\" d=\"([^\"]+)\"");
             if (!wm.Success) throw new Exception("whale path not found");
             string whaleD = Normalize(wm.Groups[1].Value);
             Whale = Geometry.Parse(whaleD);
 
-            string wordmark = File.ReadAllText(IOPath.Combine(dir, "deepseek-wordmark.svg"));
+            string wordmark = ReadText("deepseek-wordmark.svg");
             foreach (Match m in Regex.Matches(wordmark, "<path d=\"([^\"]+)\""))
             {
                 Wordmark.Add(Geometry.Parse(m.Groups[1].Value));
             }
             if (Wordmark.Count != 9) throw new Exception("wordmark path count=" + Wordmark.Count);
 
-            string html = File.ReadAllText(IOPath.Combine(dir, "splash.html"));
+            string html = ReadText("splash.html");
             MatchCollection letterMatches = Regex.Matches(html, "<path class=\"letter\"[^>]*d=\"([^\"]+)\"");
             if (letterMatches.Count != 7) throw new Exception("letter count=" + letterMatches.Count);
             foreach (Match m in letterMatches)

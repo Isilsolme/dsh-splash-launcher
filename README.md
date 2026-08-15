@@ -21,6 +21,7 @@
 ## 功能特性
 
 - **点击即出动画**：WPF 原生动画窗口，不等待浏览器冷启动，双击后立刻播放；
+- **便携单文件**：`splash.html` 与 SVG/PNG 素材内嵌进 exe，`DSH-GUI.exe` 单独一个文件即可运行；同目录放置同名素材文件可覆盖内嵌版本（自定义动画，无需重编译）；
 - **一笔一划描边**：`HARNESS` 七个字母按 CSS `cubic-bezier(0.25,0.1,0.25,1)` 缓动逐笔书写，笔尖连续、首帧空白；
 - **后台加载、就绪切换**：启动动画期间，真实 GUI 在浏览器后台（同源 iframe）完成加载，检测到官方启动页（`Loading plugins…`）消失后才淡出动画，不会出现“动画播完又加载”的断档；
 - **无 PowerShell**：启动器是单个 C#/WPF 程序，无脚本进程，规避“PowerShell 木马”类安全软件启发式误报；
@@ -30,30 +31,34 @@
 
 ## 快速开始
 
-### 环境要求
+### 方式一：下载便携版（推荐，无需构建）
+
+1. 在 [Releases](https://github.com/Isilsolme/dsh-splash-launcher/releases) 下载最新 `dsh-splash-launcher-vX.Y.Z.zip`（或只下载单文件 `DSH-GUI.exe`）；
+2. 解压（或直接把 exe）放到任意目录——exe 自包含全部素材，**单独一个文件即可运行**；
+3. 双击 `DSH-GUI.exe`。
+
+> 首次运行可能弹出 SmartScreen“Windows 已保护你的电脑”：点击 **更多信息 → 仍要运行**（exe 未代码签名，属正常提示）。
+
+### 方式二：源码构建
+
+环境要求：
 
 - Windows 10 / 11；
 - 已通过 npm 全局安装 DeepSeek Harness：`npm install -g @deepseek-ai/dsh`（`dsh web` 可用）；
 - Node.js（npm 全局安装 dsh 时自带依赖）；
 - Microsoft Edge 或 Google Chrome（二选一，自动探测）。
 
-### 构建
-
-双击或命令行运行：
+构建（双击或命令行运行）：
 
 ```bat
 build.cmd
 ```
 
-生成 `DSH-GUI.exe`（黑鲸图标）。构建仅使用 Windows 自带的 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`。
-
-> 也可以直接下载 GitHub Releases 里 Actions 构建的产物。
+生成自包含的 `DSH-GUI.exe`（黑鲸图标，素材已内嵌为资源）。构建仅使用 Windows 自带的 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`。
 
 ### 使用
 
-1. 把整个目录放在任意位置（例如 `D:\dsh-gui`）；
-2. 运行 `DSH-GUI.exe`；
-3. 如需桌面快捷方式：右键 `DSH-GUI.exe` → 发送到 → 桌面快捷方式（图标会自动使用黑鲸）。
+双击 `DSH-GUI.exe` 即可。如需桌面快捷方式：右键 `DSH-GUI.exe` → 发送到 → 桌面快捷方式（图标会自动使用黑鲸）。
 
 ### 作为 dsh 插件安装（可选）
 
@@ -69,9 +74,10 @@ dsh plugin --profile web add dsh-splash-launcher
 
 | 项 | 默认值 | 修改方式 |
 |---|---|---|
-| 工作目录（`dsh web` 启动目录） | `D:\VSCode` | 环境变量 `DSH_GUI_WORKSPACE`，或在 exe 同目录新建 `workspace.txt` 写入路径 |
+| 工作目录（`dsh web` 启动目录） | `%USERPROFILE%`（用户主目录） | 环境变量 `DSH_GUI_WORKSPACE`，或在 exe 同目录新建 `workspace.txt` 写入路径 |
 | 端口 | `3080` | 环境变量 `DSH_GUI_PORT` |
 | 启动动画版式 | HARNESS 描边 | 源码 `SplashStyle` 改为 `"&logo=draw"` 可切换为“鲸鱼本体一笔一划”版 |
+| 动画素材 | 内嵌于 exe | exe 同目录放置同名 `splash.html` / `*.svg` / `whale.png` 可覆盖（自定义，无需重编译） |
 
 ## 启动流程
 
@@ -107,6 +113,8 @@ dsh-gui/
 └─ README.md
 ```
 
+> `DSH-GUI.exe` 为自包含便携程序（素材已内嵌为资源，可在任意目录单独运行）；仓库内保留素材源文件用于源码构建，且 exe 同目录的同名文件会优先于内嵌版本（自定义动画）。
+
 ## 开发
 
 ```bat
@@ -136,8 +144,9 @@ DSH-GUI.exe --selftest
 ### 2. 启动有一定等待时间
 启动时长主要来自：`dsh web` 服务引导 + 浏览器冷启动 + 前端插件装载。动画会覆盖全部等待过程并持续到 GUI 就绪，属于“可见但不可压缩”的时间。首次运行、杀毒软件实时扫描、机械硬盘会进一步加长。可通过 WPF 描边速度（见上）让动画与等待时长更匹配。
 
-### 3. 安全软件可能误报（未签名 exe）
+### 3. SmartScreen / 安全软件可能误报（未签名 exe）
 本程序会启动隐藏进程、结束后台进程、复制文件，这类“类管理工具”行为可能触发启发式防护（例如卡巴斯基 PDM:Trojan.Win32.Generic 对旧版 PowerShell 脚本的误报）。建议：
+- 首次运行若弹出 SmartScreen“Windows 已保护你的电脑”：点击 **更多信息 → 仍要运行**；
 - 将 `dsh-gui` 目录加入杀软排除项/受信任应用程序；
 - 正式分发时对 `DSH-GUI.exe` 做代码签名（本程序已不使用 PowerShell，命中率大幅降低）。
 
@@ -145,7 +154,7 @@ DSH-GUI.exe --selftest
 如果 `3080` 端口已有 `dsh web`（例如正在终端里使用），双击只会打开 GUI 窗口，不会显示启动动画，也不会在关窗时停止该服务——这是刻意设计，避免误杀已有会话。
 
 ### 5. 同源预加载依赖 dist 写入权限
-启动器需要把 `splash.html` 等素材复制到 npm 全局的 `dsh-web-frontend/dist` 目录。若该目录不可写，会自动退回“文件页动画 → 就绪后直接跳转 GUI”模式，此时会短暂看到官方 HARNESS 加载页。
+启动器需要把 `splash.html` 等素材复制到 npm 全局的 `dsh-web-frontend/dist` 目录。若该目录不可写，会自动退回“文件页动画 → 就绪后直接跳转 GUI”模式（素材内嵌于 exe，此模式下自动释放到 `%LocalAppData%\DSH-GUI\assets`），此时会短暂看到官方 HARNESS 加载页。
 
 ### 6. 就绪判定依赖标题
 WPF 以浏览器窗口标题包含 `DeepSeek Harness` 判定 GUI 就绪；若官方前端修改标题结构，可能需要同步更新 `SplashWindow.AppTitle`。

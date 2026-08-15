@@ -1,9 +1,12 @@
 {
   "name": "dsh-splash-launcher",
-  "version": "1.0.0",
-  "description": "DSH Windows one-click launcher with a stroke-by-stroke startup animation: ships DSH-GUI.exe and registers the desktop_launch agent tool.",
+  "version": "1.1.0",
+  "description": "DSH Windows one-click launcher with a stroke-by-stroke startup animation: ships a self-contained DSH-GUI.exe and registers the desktop_launch agent tool.",
   "type": "module",
   "main": "lib/index.js",
+  "scripts": {
+    "prepublishOnly": "build.cmd"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./package.json": "./package.json"
