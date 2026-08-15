@@ -1,0 +1,8 @@
+selftest.txt
+DSH-GUI.new.exe
+DSH-GUI.exe
+legacy/
+backup-*/
+*.log
+*.tmp
+.vs/

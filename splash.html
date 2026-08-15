@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/png" href="whale.png" />
+<title>DSH</title>
+<style>
+  :root {
+    --bg: #070b18;
+    --accent: #4d6bfe;
+    --cyan: #22d3ee;
+    --text: #e7ecff;
+    --muted: #8b96bb;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+  }
+
+  /* 真实 GUI 在后台 iframe 中加载，就绪后揭示 */
+  #appFrame {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #070b18;
+    visibility: hidden;
+    z-index: 1;
+  }
+
+  /* ---------- splash 覆盖层 ---------- */
+  #app-loading {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    color: var(--text);
+    transition: opacity 0.3s;
+  }
+  #app-loading.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* 背景柔光 */
+  .bg {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    background:
+      radial-gradient(1100px 750px at 78% -8%, rgba(77, 107, 254, 0.24), transparent 60%),
+      radial-gradient(850px 650px at 10% 112%, rgba(34, 211, 238, 0.12), transparent 55%),
+      linear-gradient(180deg, #070b18 0%, #0a1024 55%, #070b18 100%);
+  }
+  .bg::before {
+    content: "";
+    position: absolute;
+    width: 520px; height: 520px;
+    left: -130px; top: -120px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(77, 107, 254, 0.30), transparent 65%);
+    filter: blur(28px);
+    animation: drift-a 11s ease-in-out infinite alternate;
+  }
+  .bg::after {
+    content: "";
+    position: absolute;
+    width: 580px; height: 580px;
+    right: -160px; bottom: -180px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(34, 211, 238, 0.18), transparent 65%);
+    filter: blur(34px);
+    animation: drift-b 13s ease-in-out infinite alternate;
+  }
+  @keyframes drift-a {
+    from { transform: translate(0, 0) scale(1); }
+    to   { transform: translate(110px, 60px) scale(1.12); }
+  }
+  @keyframes drift-b {
+    from { transform: translate(0, 0) scale(1); }
+    to   { transform: translate(-120px, -70px) scale(1.08); }
+  }
+
+  /* ---------- 居中布局 ---------- */
+  .splash {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+    transform: translateZ(0);
+  }
+
+  .splash-logo {
+    width: 72px;
+    height: 72px;
+    filter: brightness(0) invert(1) drop-shadow(0 0 18px rgba(77, 107, 254, 0.55));
+    will-change: transform, opacity;
+    animation:
+      splash-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both,
+      splash-flicker 1.8s ease-in-out 0.5s infinite;
+  }
+  .splash-logo.draw {
+    width: 96px;
+    height: 96px;
+    filter: none;
+    animation: splash-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .splash-brand {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .splash-deepseek {
+    width: 234px;
+    height: auto;
+    display: block;
+    margin-top: 4px;
+    will-change: transform, opacity;
+    animation: splash-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
+  }
+
+  /* “HARNESS”七个字母：与 SPlayer-Next 的 Next 相同的描边动画，作为视觉重点 */
+  .splash-harness {
+    width: 310px;
+    height: 62px;
+    filter: drop-shadow(0 0 12px rgba(77, 107, 254, 0.45));
+  }
+  .splash-harness .letter {
+    stroke-width: 10;
+    fill: none;
+    stroke-linecap: square;
+    stroke-linejoin: round;
+    stroke-dasharray: 400;
+    stroke-dashoffset: 400;
+    will-change: stroke-dashoffset;
+    animation: splash-draw 1s ease forwards;
+  }
+  .splash-harness path:nth-of-type(1) { animation-delay: 0.20s; }
+  .splash-harness path:nth-of-type(2) { animation-delay: 0.42s; }
+  .splash-harness path:nth-of-type(3) { animation-delay: 0.64s; }
+  .splash-harness path:nth-of-type(4) { animation-delay: 0.86s; }
+  .splash-harness path:nth-of-type(5) { animation-delay: 1.08s; }
+  .splash-harness path:nth-of-type(6) { animation-delay: 1.30s; }
+  .splash-harness path:nth-of-type(7) { animation-delay: 1.52s; }
+
+  .splash-footer {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 32px;
+    z-index: 1;
+    text-align: center;
+    font-size: 12px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    animation: splash-rise-footer 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.36s both;
+  }
+
+  /* hold 模式：直接呈现动画结束态（WPF 即时启动页 → 浏览器启动页无缝衔接） */
+  body.hold .splash-logo {
+    animation: splash-flicker 1.8s ease-in-out 0.5s infinite;
+  }
+  body.hold .splash-deepseek {
+    animation: none;
+    opacity: 1;
+  }
+  body.hold .splash-harness .letter {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+  body.hold .splash-footer {
+    animation: none;
+    opacity: 0.4;
+  }
+
+  /* ---------- keyframes ---------- */
+  @keyframes splash-rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes splash-rise-footer {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 0.4; transform: translateY(0); }
+  }
+  @keyframes splash-flicker {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.6; }
+  }
+  @keyframes splash-draw {
+    to { stroke-dashoffset: 0; }
+  }
+</style>
+</head>
+<body>
+  <iframe id="appFrame" title="DeepSeek Harness" src="about:blank"></iframe>
+
+  <div id="app-loading">
+    <div class="bg"></div>
+
+    <div class="splash">
+      <img id="logo" class="splash-logo" src="whale.png" alt="DeepSeek" draggable="false" />
+      <div class="splash-brand">
+        <img class="splash-deepseek" src="deepseek-wordmark.svg" alt="deepseek" draggable="false" />
+        <svg class="splash-harness" viewBox="0 0 700 140" aria-hidden="true">
+          <defs>
+            <linearGradient id="harnessGrad" x1="0" y1="20" x2="700" y2="120" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#a7c0ff" />
+              <stop offset="0.5" stop-color="#4d6bfe" />
+              <stop offset="1" stop-color="#22d3ee" />
+            </linearGradient>
+          </defs>
+          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M15 20 L15 120 M85 20 L85 120 M15 70 L85 70" />
+          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M115 120 L150 20 L185 120 M132 72 L168 72" />
+          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M215 20 L215 120 M215 20 C242 16 285 19 285 45 C285 62 270 70 245 70 L215 70 M258 71 L285 120" />
+          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M315 120 L315 20 L385 120 L385 20" />
+          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M415 20 L415 120 M415 20 L485 20 M415 70 L465 70 M415 120 L485 120" />
+          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M585 20 L515 20 L515 70 L585 70 L585 120 L515 120" />
+          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M685 20 L615 20 L615 70 L685 70 L685 120 L615 120" />
+        </svg>
+      </div>
+    </div>
+
+    <div class="splash-footer">DeepSeek Harness · DSH GUI</div>
+  </div>
+
+<script>
+(function () {
+  var qs = new URLSearchParams(location.search);
+  var target = qs.get('target') || 'http://127.0.0.1:3080';
+  var timeoutSec = Math.max(15, parseInt(qs.get('timeout') || '90', 10) || 90);
+  // 双击 splash.html 打开（无参数）= 动画循环预览
+  var demo = qs.get('demo') === '1' || !qs.has('target');
+  // logo=draw：切换成鲸鱼本体一笔一划的旧版式
+  var drawLogo = qs.get('logo') === 'draw';
+  // 由 dsh 服务托管（同源）：可后台 iframe 加载真实 GUI 并检测就绪
+  var served = location.protocol === 'http:' || location.protocol === 'https:';
+  // hold：直接呈现结束态，用于 WPF 即时启动页 → 浏览器启动页的无缝衔接
+  var hold = qs.get('hold') === '1';
+  if (hold) { document.body.classList.add('hold'); }
+  // handoff=0：dist 同步失败时的兜底——端口就绪后直接进 GUI（会短暂看到官方加载页）
+  var handoff = qs.get('handoff') !== '0';
+
+  if (drawLogo) {
+    var logo = document.getElementById('logo');
+    logo.src = 'whale-anim.svg';
+    logo.classList.add('draw');
+  }
+
+  var startedAt = performance.now();
+  var splashAnimMs = drawLogo ? 3000 : 2700;
+  var leaving = false;
+
+  if (demo) {
+    setInterval(function () { location.reload(); }, 9000);
+    return;
+  }
+
+  var frame = document.getElementById('appFrame');
+  frame.setAttribute('allow', 'clipboard-read; clipboard-write; fullscreen; autoplay');
+
+  /* 静默端口探测（仅 file:// 阶段使用） */
+  function probe() {
+    return new Promise(function (resolve) {
+      var settled = false;
+      var timer = setTimeout(function () { finish(false); }, 1500);
+      function finish(v) {
+        if (!settled) { settled = true; clearTimeout(timer); resolve(v); }
+      }
+      try {
+        fetch(target, { mode: 'no-cors', cache: 'no-store' })
+          .then(function () { finish(true); })
+          .catch(function () {});
+      } catch (e) {}
+      var img = new Image();
+      img.onload = function () { finish(true); };
+      img.onerror = function () { finish(false); };
+      img.src = target + '/favicon.svg?probe=' + Date.now();
+    });
+  }
+
+  function fadeAndGo(url) {
+    if (leaving) return;
+    leaving = true;
+    var overlay = document.getElementById('app-loading');
+    overlay.classList.add('hidden');
+    var done = false;
+    var go = function () {
+      if (done) return;
+      done = true;
+      location.replace(url);
+    };
+    overlay.addEventListener('transitionend', go, { once: true });
+    setTimeout(go, 400);
+  }
+
+  function appReady() {
+    var doc = null;
+    try { doc = frame.contentDocument; } catch (e) { return false; }
+    if (!doc || !doc.getElementById('root')) return false;
+    var root = doc.getElementById('root');
+    // 官方 shell 的启动卡片 class 形如 _boot_xxx；消失即插件装载完成
+    if (root.querySelector('[class*="_boot_"]')) return false;
+    if (root.querySelector('[class*="_failed_"]')) return true;   // 失败态也揭示，由应用自己展示错误
+    return root.childElementCount > 0;
+  }
+
+  function revealApp() {
+    if (leaving) return;
+    leaving = true;
+    frame.style.visibility = 'visible';
+    var overlay = document.getElementById('app-loading');
+    overlay.classList.add('hidden');
+    overlay.addEventListener('transitionend', function () { overlay.remove(); }, { once: true });
+    setTimeout(function () {
+      try { frame.focus(); frame.contentWindow.focus(); } catch (e) {}
+      setInterval(function () {
+        try { var d = frame.contentDocument; if (d) document.title = d.title; } catch (e) {}
+      }, 1000);
+    }, 350);
+  }
+
+  if (served) {
+    /* 同源模式：后台加载真实 GUI，真正就绪后再揭示 */
+    frame.src = '/';
+    var minBeforeReveal = hold ? 250 : splashAnimMs;
+    var revealDeadline = startedAt + timeoutSec * 1000;
+    (function watch() {
+      if (leaving) return;
+      var now = performance.now();
+      if ((appReady() && now - startedAt >= minBeforeReveal) || now >= revealDeadline) {
+        revealApp();
+        return;
+      }
+      setTimeout(watch, 150);
+    })();
+  } else {
+    /* file:// 阶段：探测端口；就绪后转到同源 splash（hold 态，保持画面连续） */
+    (function poll() {
+      if (leaving) return;
+      probe().then(function (up) {
+        var elapsed = performance.now() - startedAt;
+        if (up && elapsed >= splashAnimMs) {
+          if (handoff) {
+            var base = target.replace(/\/+$/, '');
+            fadeAndGo(base + '/splash.html?hold=1&timeout=60' + (drawLogo ? '&logo=draw' : ''));
+          } else {
+            fadeAndGo(target);
+          }
+        } else if (elapsed > timeoutSec * 1000) {
+          fadeAndGo(target);   // 兜底：交给浏览器显示结果
+        } else {
+          setTimeout(poll, 300);
+        }
+      });
+    })();
+  }
+})();
+</script>
+</body>
+</html>
