@@ -791,8 +791,8 @@ namespace DshGui
         const string AppTitle = "DeepSeek Harness";
         const double MinShowSec = 2.0;
         const double MaxLifeSec = 45;
-        const double DrawSeconds = 0.22;   // 单字母描边时长（整体压缩到约 2s）
-        const double LetterGap = 0.04;     // 字母写完后的停顿
+        const double DrawSeconds = 0.22;   // 单字母描边时长
+        const double LetterStep = 0.14;    // 相邻字母起笔间隔（小于 DrawSeconds，重叠连续运笔）
 
         class FigureInfo
         {
@@ -957,7 +957,7 @@ namespace DshGui
                     p.StrokeDashArray = new DoubleCollection { l };
                     p.StrokeDashOffset = 1.1 * l;   // 首帧完全隐藏，不露起始点
                     harnessCanvas.Children.Add(p);
-                    drawFigures.Add(new FigureInfo { Path = p, Len = l, Acc = acc, Total = total, Delay = 0.20 + i * (DrawSeconds + LetterGap) });
+                    drawFigures.Add(new FigureInfo { Path = p, Len = l, Acc = acc, Total = total, Delay = 0.20 + i * LetterStep });
                     acc += l;
                 }
             }
@@ -1061,7 +1061,7 @@ namespace DshGui
                         fig.Path.StrokeDashOffset = 1.1 * l;
                         continue;
                     }
-                    double s = CssEase(p) * fig.Total;   // 本字母“笔尖”走过的总长度
+                    double s = p * fig.Total;   // 本字母“笔尖”走过的总长度（linear 线性速度）
                     double x = s - fig.Acc;              // 本段内走过的长度
                     if (x <= 0)
                     {

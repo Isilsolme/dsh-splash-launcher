@@ -131,8 +131,8 @@ DSH-GUI.exe --selftest
 
 | 想调什么 | 位置 |
 |---|---|
-| 描边速度 | `SplashWindow.DrawSeconds`（默认 0.22s/字母，顺序书写） |
-| 字母间隔 | `SplashWindow.LetterGap`（默认 0.04s，字母写完后的停顿） |
+| 描边速度 | `SplashWindow.DrawSeconds`（默认 0.22s/字母，线性速度） |
+| 相邻字母起笔间隔 | `SplashWindow.LetterStep`（默认 0.14s，重叠书写） |
 | 动画窗口尺寸 | `Program.WinW / WinH`（默认 1100×720） |
 | 最短动画时长 | `SplashWindow.MinShowSec`（默认 2.0s） |
 | 就绪判定标题 | `SplashWindow.AppTitle`（按“包含”匹配） |

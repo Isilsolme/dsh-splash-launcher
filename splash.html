@@ -196,16 +196,16 @@
     stroke-dasharray: 400;
     stroke-dashoffset: 400;
     will-change: stroke-dashoffset;
-    /* 每个字母 0.22s 写完，字母间停顿 0.04s，整体约 2s */
-    animation: splash-draw 0.22s ease forwards;
+    /* 每个字母 0.22s，前一个未写完下一个就开始，linear 线性速度，整体约 1.3s */
+    animation: splash-draw 0.22s linear forwards;
   }
   .splash-harness path:nth-of-type(1) { animation-delay: 0.20s; }
-  .splash-harness path:nth-of-type(2) { animation-delay: 0.46s; }
-  .splash-harness path:nth-of-type(3) { animation-delay: 0.72s; }
-  .splash-harness path:nth-of-type(4) { animation-delay: 0.98s; }
-  .splash-harness path:nth-of-type(5) { animation-delay: 1.24s; }
-  .splash-harness path:nth-of-type(6) { animation-delay: 1.50s; }
-  .splash-harness path:nth-of-type(7) { animation-delay: 1.76s; }
+  .splash-harness path:nth-of-type(2) { animation-delay: 0.34s; }
+  .splash-harness path:nth-of-type(3) { animation-delay: 0.48s; }
+  .splash-harness path:nth-of-type(4) { animation-delay: 0.62s; }
+  .splash-harness path:nth-of-type(5) { animation-delay: 0.76s; }
+  .splash-harness path:nth-of-type(6) { animation-delay: 0.90s; }
+  .splash-harness path:nth-of-type(7) { animation-delay: 1.04s; }
 
   /* 浅色模式下换用更深的渐变，保证 HARNESS 在接近白色的背景上清晰可见 */
   @media (prefers-color-scheme: light) {
@@ -335,7 +335,7 @@
   }
 
   var startedAt = performance.now();
-  var splashAnimMs = drawLogo ? 3000 : 2000;
+  var splashAnimMs = drawLogo ? 3000 : 1500;
   var leaving = false;
 
   if (demo) {
