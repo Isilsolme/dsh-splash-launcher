@@ -196,10 +196,13 @@ namespace DshGui
 
         static void LauncherWorker()
         {
+            Stopwatch sw = Stopwatch.StartNew();
             try
             {
                 ResolveDshInstall();
+                Log("resolve dsh install: " + sw.ElapsedMilliseconds + "ms");
                 SyncSplashToDist();
+                Log("sync splash to dist: " + sw.ElapsedMilliseconds + "ms");
 
                 // 清理过期 owner 锁
                 try
@@ -244,18 +247,30 @@ namespace DshGui
                     FinishApp(1);
                     return;
                 }
+                Log("server process started: " + sw.ElapsedMilliseconds + "ms");
+
+                // 提前打开 file:// splash，让浏览器冷启动与 DSH 服务等待重叠
+                string prewarmUrl = FileSplashUrl(ServedOk ? "1" : "0");
+                Log("prewarm browser: " + sw.ElapsedMilliseconds + "ms -> " + prewarmUrl);
+                OpenBrowser(prewarmUrl, true);
+                Log("browser spawned: " + sw.ElapsedMilliseconds + "ms");
 
                 if (!WaitPort(90))
                 {
                     UiMessage("DSH web 服务 90 秒内未就绪，请查看日志：" + ServerErr, "DSH GUI", MessageBoxImage.Error);
+                    KillBrowser();
                     KillTree(server.Id);
                     try { File.Delete(LockFile); } catch { }
                     FinishApp(1);
                     return;
                 }
-                Log("server ready");
+                Log("server ready: " + sw.ElapsedMilliseconds + "ms");
 
+                // 不依赖 file:// splash 的自动跳转（file:// 探测 http 端口在 Chrome/Edge 里不可靠），
+                // 端口就绪后主动关掉预热窗口，再打开正式的同源 splash。
+                ClosePrewarmBrowser();
                 OpenBrowser(ServedOk ? ServedSplashUrl() : FileSplashUrl("0"), true);
+                Log("browser handoff ready: " + sw.ElapsedMilliseconds + "ms");
 
                 // 窗口关闭后停止本次启动的服务
                 while (GuiBrowserAlive()) Thread.Sleep(1000);
@@ -528,6 +543,67 @@ namespace DshGui
             catch (Exception ex) { Log("kill failed: " + ex.Message); }
         }
 
+        static void ClosePrewarmBrowser()
+        {
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='msedge.exe' OR Name='chrome.exe'"))
+                {
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        string cl = mo["CommandLine"] as string;
+                        // 只关预热窗口：file:// splash 带 handoff=1；正式窗口是 http:// 同源 splash
+                        if (cl != null && cl.Contains("DSH-GUI") && cl.Contains("file:///") && cl.Contains("handoff=1"))
+                        {
+                            uint pid = (uint)mo["ProcessId"];
+                            try
+                            {
+                                ProcessStartInfo psi = new ProcessStartInfo("taskkill.exe", "/PID " + pid + " /T /F");
+                                psi.CreateNoWindow = true;
+                                psi.UseShellExecute = false;
+                                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                                using (Process p = Process.Start(psi)) { p.WaitForExit(3000); }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                Log("closed prewarm browser");
+            }
+            catch (Exception ex) { Log("close prewarm browser failed: " + ex.Message); }
+        }
+
+        static void KillBrowser()
+        {
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='msedge.exe' OR Name='chrome.exe'"))
+                {
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        string cl = mo["CommandLine"] as string;
+                        if (cl != null && cl.Contains("DSH-GUI"))
+                        {
+                            uint pid = (uint)mo["ProcessId"];
+                            try
+                            {
+                                ProcessStartInfo psi = new ProcessStartInfo("taskkill.exe", "/PID " + pid + " /T /F");
+                                psi.CreateNoWindow = true;
+                                psi.UseShellExecute = false;
+                                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                                using (Process p = Process.Start(psi)) { p.WaitForExit(3000); }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                Log("stopped prewarmed browser");
+            }
+            catch (Exception ex) { Log("kill browser failed: " + ex.Message); }
+        }
+
         static bool GuiBrowserAlive()
         {
             try
@@ -546,7 +622,7 @@ namespace DshGui
             return false;
         }
 
-        static void Log(string message)
+        internal static void Log(string message)
         {
             try
             {
@@ -1030,6 +1106,10 @@ namespace DshGui
                 }
                 if ((appUp && elapsed >= MinShowSec) || elapsed >= MaxLifeSec)
                 {
+                    if (appUp)
+                        Program.Log("splash appUp after " + elapsed.ToString("0.00") + "s");
+                    else
+                        Program.Log("splash maxlife reached after " + elapsed.ToString("0.00") + "s");
                     closing = true;
                     drawTimer.Stop();
                     timer.Stop();
