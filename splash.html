@@ -8,10 +8,53 @@
 <style>
   :root {
     --bg: #070b18;
+    --bg-2: #0a1024;
     --accent: #4d6bfe;
     --cyan: #22d3ee;
     --text: #e7ecff;
     --muted: #8b96bb;
+    --logo-filter: brightness(0) invert(1) drop-shadow(0 0 18px rgba(77, 107, 254, 0.55));
+    --harness-shadow: drop-shadow(0 0 12px rgba(77, 107, 254, 0.45));
+    --wordmark-filter: none;
+  }
+
+  /* 浅色：极淡蓝色系接近白色；跟随系统深浅色切换 */
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f8ff;
+      --bg-2: #eaf2ff;
+      --accent: #4d6bfe;
+      --cyan: #0e9bb8;
+      --text: #1b2a5b;
+      --muted: #5a6a94;
+      --logo-filter: brightness(0) drop-shadow(0 0 18px rgba(77, 107, 254, 0.25));
+      --harness-shadow: drop-shadow(0 0 10px rgba(77, 107, 254, 0.22));
+      --wordmark-filter: brightness(0);
+    }
+  }
+
+  /* dsh 外观设置显式指定时，覆盖系统主题 */
+  html.force-dark {
+    --bg: #070b18;
+    --bg-2: #0a1024;
+    --accent: #4d6bfe;
+    --cyan: #22d3ee;
+    --text: #e7ecff;
+    --muted: #8b96bb;
+    --logo-filter: brightness(0) invert(1) drop-shadow(0 0 18px rgba(77, 107, 254, 0.55));
+    --harness-shadow: drop-shadow(0 0 12px rgba(77, 107, 254, 0.45));
+    --wordmark-filter: none;
+  }
+  html.force-light {
+    --bg: #f4f8ff;
+    --bg-2: #eaf2ff;
+    --accent: #4d6bfe;
+    --cyan: #0e9bb8;
+    --text: #1b2a5b;
+    --muted: #5a6a94;
+    --logo-filter: brightness(0) drop-shadow(0 0 18px rgba(77, 107, 254, 0.25));
+    --harness-shadow: drop-shadow(0 0 10px rgba(77, 107, 254, 0.22));
+    --wordmark-filter: brightness(0);
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -34,7 +77,7 @@
     width: 100%;
     height: 100%;
     border: 0;
-    background: #070b18;
+    background: var(--bg);
     visibility: hidden;
     z-index: 1;
   }
@@ -64,7 +107,7 @@
     background:
       radial-gradient(1100px 750px at 78% -8%, rgba(77, 107, 254, 0.24), transparent 60%),
       radial-gradient(850px 650px at 10% 112%, rgba(34, 211, 238, 0.12), transparent 55%),
-      linear-gradient(180deg, #070b18 0%, #0a1024 55%, #070b18 100%);
+      linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 55%, var(--bg) 100%);
   }
   .bg::before {
     content: "";
@@ -109,7 +152,7 @@
   .splash-logo {
     width: 72px;
     height: 72px;
-    filter: brightness(0) invert(1) drop-shadow(0 0 18px rgba(77, 107, 254, 0.55));
+    filter: var(--logo-filter);
     will-change: transform, opacity;
     animation:
       splash-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both,
@@ -134,6 +177,7 @@
     height: auto;
     display: block;
     margin-top: 4px;
+    filter: var(--wordmark-filter);
     will-change: transform, opacity;
     animation: splash-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
   }
@@ -142,25 +186,39 @@
   .splash-harness {
     width: 310px;
     height: 62px;
-    filter: drop-shadow(0 0 12px rgba(77, 107, 254, 0.45));
+    filter: var(--harness-shadow);
   }
   .splash-harness .letter {
-    stroke-width: 10;
+    stroke-width: 6;
     fill: none;
     stroke-linecap: square;
     stroke-linejoin: round;
     stroke-dasharray: 400;
     stroke-dashoffset: 400;
     will-change: stroke-dashoffset;
-    animation: splash-draw 1s ease forwards;
+    /* 每个字母 0.22s 写完，字母间停顿 0.04s，整体约 2s */
+    animation: splash-draw 0.22s ease forwards;
   }
   .splash-harness path:nth-of-type(1) { animation-delay: 0.20s; }
-  .splash-harness path:nth-of-type(2) { animation-delay: 0.42s; }
-  .splash-harness path:nth-of-type(3) { animation-delay: 0.64s; }
-  .splash-harness path:nth-of-type(4) { animation-delay: 0.86s; }
-  .splash-harness path:nth-of-type(5) { animation-delay: 1.08s; }
-  .splash-harness path:nth-of-type(6) { animation-delay: 1.30s; }
-  .splash-harness path:nth-of-type(7) { animation-delay: 1.52s; }
+  .splash-harness path:nth-of-type(2) { animation-delay: 0.46s; }
+  .splash-harness path:nth-of-type(3) { animation-delay: 0.72s; }
+  .splash-harness path:nth-of-type(4) { animation-delay: 0.98s; }
+  .splash-harness path:nth-of-type(5) { animation-delay: 1.24s; }
+  .splash-harness path:nth-of-type(6) { animation-delay: 1.50s; }
+  .splash-harness path:nth-of-type(7) { animation-delay: 1.76s; }
+
+  /* 浅色模式下换用更深的渐变，保证 HARNESS 在接近白色的背景上清晰可见 */
+  @media (prefers-color-scheme: light) {
+    .splash-harness .letter {
+      stroke: url(#harnessGradLight);
+    }
+  }
+  html.force-light .splash-harness .letter {
+    stroke: url(#harnessGradLight);
+  }
+  html.force-dark .splash-harness .letter {
+    stroke: url(#harnessGrad);
+  }
 
   .splash-footer {
     position: absolute;
@@ -227,11 +285,16 @@
               <stop offset="0.5" stop-color="#4d6bfe" />
               <stop offset="1" stop-color="#22d3ee" />
             </linearGradient>
+            <linearGradient id="harnessGradLight" x1="0" y1="20" x2="700" y2="120" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#5b7cfa" />
+              <stop offset="0.5" stop-color="#4d6bfe" />
+              <stop offset="1" stop-color="#0e9bb8" />
+            </linearGradient>
           </defs>
           <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M15 20 L15 120 M85 20 L85 120 M15 70 L85 70" />
-          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M115 120 L150 20 L185 120 M132 72 L168 72" />
+          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M115 120 L150 20 M150 20 L185 120 M132 72 L168 72" />
           <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M215 20 L215 120 M215 20 C242 16 285 19 285 45 C285 62 270 70 245 70 L215 70 M258 71 L285 120" />
-          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M315 120 L315 20 L385 120 L385 20" />
+          <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M315 20 L315 120 M315 20 L385 120 M385 120 L385 20" />
           <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M415 20 L415 120 M415 20 L485 20 M415 70 L465 70 M415 120 L485 120" />
           <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M585 20 L515 20 L515 70 L585 70 L585 120 L515 120" />
           <path class="letter" pathLength="400" stroke="url(#harnessGrad)" d="M685 20 L615 20 L615 70 L685 70 L685 120 L615 120" />
@@ -245,6 +308,12 @@
 <script>
 (function () {
   var qs = new URLSearchParams(location.search);
+  // dsh 外观设置：light/dark/system，由启动器读取 settings.yaml 后通过 theme 参数传入
+  var theme = qs.get('theme');
+  if (theme === 'light' || theme === 'dark') {
+    document.documentElement.classList.add('force-' + theme);
+    document.documentElement.style.colorScheme = theme;
+  }
   var target = qs.get('target') || 'http://127.0.0.1:3080';
   var timeoutSec = Math.max(15, parseInt(qs.get('timeout') || '90', 10) || 90);
   // 双击 splash.html 打开（无参数）= 动画循环预览
@@ -266,7 +335,7 @@
   }
 
   var startedAt = performance.now();
-  var splashAnimMs = drawLogo ? 3000 : 2700;
+  var splashAnimMs = drawLogo ? 3000 : 2000;
   var leaving = false;
 
   if (demo) {

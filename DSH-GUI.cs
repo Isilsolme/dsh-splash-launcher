@@ -10,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Management;
 using System.Net.Sockets;
+using Microsoft.Win32;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -53,6 +54,56 @@ namespace DshGui
         static double WinH = 720;
         static int WinLeft = 0;
         static int WinTop = 0;
+
+        // dsh 用户数据根目录：$DSH_HOME > ~/.dsh，与 dsh-home-paths 的 resolveDshHome 保持一致
+        static string DshHomePath()
+        {
+            string env = Environment.GetEnvironmentVariable("DSH_HOME");
+            string userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!string.IsNullOrWhiteSpace(env))
+            {
+                env = env.Trim();
+                if (env == "~") return userHome;
+                if (env.StartsWith("~/") || env.StartsWith("~\\")) env = IOPath.Combine(userHome, env.Substring(2));
+                return IOPath.GetFullPath(env);
+            }
+            return IOPath.Combine(userHome, ".dsh");
+        }
+
+        // 读取 dsh 外观偏好：settings.yaml 的 ui-theme.preference，缺省跟随系统
+        internal static string ReadDshThemePreference()
+        {
+            try
+            {
+                string file = IOPath.Combine(DshHomePath(), "settings.yaml");
+                if (!File.Exists(file)) return "system";
+                string[] lines = File.ReadAllLines(file);
+                bool inTheme = false;
+                foreach (string raw in lines)
+                {
+                    string trimmed = raw.Trim();
+                    if (!inTheme)
+                    {
+                        if (trimmed == "ui-theme:" || trimmed.StartsWith("ui-theme:")) inTheme = true;
+                        continue;
+                    }
+                    if (trimmed.StartsWith("preference:"))
+                    {
+                        string val = trimmed.Substring("preference:".Length).Trim().Trim('"', '\'');
+                        if (val == "light" || val == "dark" || val == "system") return val;
+                    }
+                    if (raw.Length > 0 && !char.IsWhiteSpace(raw[0]) && !trimmed.StartsWith("preference:"))
+                        inTheme = false;
+                }
+            }
+            catch { }
+            return "system";
+        }
+
+        static string ThemeQuery()
+        {
+            return "&theme=" + Uri.EscapeDataString(ReadDshThemePreference());
+        }
 
         static void LoadConfig()
         {
@@ -300,13 +351,13 @@ namespace DshGui
 
         static string ServedSplashUrl()
         {
-            return Url + "/splash.html?hold=1&target=%2F&timeout=60" + SplashStyle;
+            return Url + "/splash.html?hold=1&target=%2F&timeout=60" + SplashStyle + ThemeQuery();
         }
 
         static string FileSplashUrl(string handoff)
         {
             string file = new Uri(IOPath.Combine(SplashDir(), "splash.html")).AbsoluteUri;
-            return file + "?target=" + Uri.EscapeDataString(Url) + "&timeout=90&handoff=" + handoff + SplashStyle;
+            return file + "?target=" + Uri.EscapeDataString(Url) + "&timeout=90&handoff=" + handoff + SplashStyle + ThemeQuery();
         }
 
         static string SplashDir()
@@ -517,6 +568,7 @@ namespace DshGui
                 sb.AppendLine("dist=" + DistDir);
                 if (string.IsNullOrEmpty(DshBin) || !File.Exists(DshBin))
                     sb.AppendLine("WARNING: dsh 未找到（npm root -g 解析失败）；请确认已执行 npm install -g @deepseek-ai/dsh");
+                sb.AppendLine("dshTheme=" + ReadDshThemePreference());
                 sb.AppendLine("selftest OK");
                 try { File.WriteAllText(IOPath.Combine(AppDir, "selftest.txt"), sb.ToString(), Encoding.UTF8); } catch { }
                 return 0;
@@ -661,10 +713,10 @@ namespace DshGui
     {
         const string BrowserTitle = "DSH";
         const string AppTitle = "DeepSeek Harness";
-        const double MinShowSec = 3.2;
+        const double MinShowSec = 2.0;
         const double MaxLifeSec = 45;
-        const double DrawSeconds = 1.25;   // 单字母描边时长（比之前稍慢）
-        const double LetterGap = 0.24;     // 相邻字母起笔间隔
+        const double DrawSeconds = 0.22;   // 单字母描边时长（整体压缩到约 2s）
+        const double LetterGap = 0.04;     // 字母写完后的停顿
 
         class FigureInfo
         {
@@ -677,13 +729,40 @@ namespace DshGui
 
         readonly List<FigureInfo> drawFigures = new List<FigureInfo>();
 
+        // 跟随 Windows 应用深浅色：HKCU\...\Themes\Personalize\AppsUseLightTheme
+        static bool IsSystemLightTheme()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    if (key != null)
+                    {
+                        object v = key.GetValue("AppsUseLightTheme");
+                        if (v != null) return Convert.ToInt32(v) == 1;
+                    }
+                }
+            }
+            catch { }
+            return false;   // 默认深色
+        }
+
+        // 跟随 dsh 外观设置：light/dark/system；system 时再跟随 Windows 应用深浅色
+        static bool IsLightTheme()
+        {
+            string pref = Program.ReadDshThemePreference();
+            if (pref == "light") return true;
+            if (pref == "dark") return false;
+            return IsSystemLightTheme();
+        }
+
         public SplashWindow(double width = 960, double height = 640)
         {
             Width = width;
             Height = height;
             WindowStyle = WindowStyle.None;   // 无边框，启动期间像一张全屏动画卡
             AllowsTransparency = false;
-            Background = new SolidColorBrush(C("#070b18"));
+            Background = new SolidColorBrush(C(IsLightTheme() ? "#f4f8ff" : "#070b18"));
             Topmost = true;
             ShowInTaskbar = false;
             ResizeMode = ResizeMode.NoResize;
@@ -697,14 +776,15 @@ namespace DshGui
         FrameworkElement BuildRoot()
         {
             Grid root = new Grid();
+            bool light = IsLightTheme();
 
             Rectangle bg = new Rectangle();
             LinearGradientBrush bgBrush = new LinearGradientBrush();
             bgBrush.StartPoint = new Point(0, 0);
             bgBrush.EndPoint = new Point(0, 1);
-            bgBrush.GradientStops.Add(new GradientStop(C("#070b18"), 0));
-            bgBrush.GradientStops.Add(new GradientStop(C("#0a1024"), 0.55));
-            bgBrush.GradientStops.Add(new GradientStop(C("#070b18"), 1));
+            bgBrush.GradientStops.Add(new GradientStop(C(light ? "#f4f8ff" : "#070b18"), 0));
+            bgBrush.GradientStops.Add(new GradientStop(C(light ? "#eaf2ff" : "#0a1024"), 0.55));
+            bgBrush.GradientStops.Add(new GradientStop(C(light ? "#f4f8ff" : "#070b18"), 1));
             bg.Fill = bgBrush;
             root.Children.Add(bg);
 
@@ -722,7 +802,7 @@ namespace DshGui
             ShapePath whalePath = new ShapePath
             {
                 Data = Assets.Whale,
-                Fill = Brushes.White,
+                Fill = new SolidColorBrush(C(light ? "#1b2a5b" : "#ffffff")),
                 RenderTransform = new ScaleTransform(72.0 / 50.0, 72.0 / 50.0)
             };
             whaleInner.Children.Add(whalePath);
@@ -759,7 +839,7 @@ namespace DshGui
             wordGroup.Children.Add(new TranslateTransform(-26 * wordScale, 0));
             foreach (Geometry wg in Assets.Wordmark)
             {
-                wordCanvas.Children.Add(new ShapePath { Data = wg, Fill = new SolidColorBrush(C("#E7ECFF")), RenderTransform = wordGroup });
+                wordCanvas.Children.Add(new ShapePath { Data = wg, Fill = new SolidColorBrush(C(light ? "#1b2a5b" : "#E7ECFF")), RenderTransform = wordGroup });
             }
             wordCanvas.Opacity = 0;
             TranslateTransform wordRise = new TranslateTransform(0, 12);
@@ -775,9 +855,9 @@ namespace DshGui
             hGrad.MappingMode = BrushMappingMode.Absolute;
             hGrad.StartPoint = new Point(0, 20);
             hGrad.EndPoint = new Point(700, 120);
-            hGrad.GradientStops.Add(new GradientStop(C("#a7c0ff"), 0));
+            hGrad.GradientStops.Add(new GradientStop(C(light ? "#5b7cfa" : "#a7c0ff"), 0));
             hGrad.GradientStops.Add(new GradientStop(C("#4d6bfe"), 0.5));
-            hGrad.GradientStops.Add(new GradientStop(C("#22d3ee"), 1));
+            hGrad.GradientStops.Add(new GradientStop(C(light ? "#0e9bb8" : "#22d3ee"), 1));
 
             for (int i = 0; i < Assets.Letters.Count; i++)
             {
@@ -792,7 +872,7 @@ namespace DshGui
                         Data = Assets.LetterFigures[i][j],
                         RenderTransform = harnessScale,
                         Stroke = hGrad,
-                        StrokeThickness = 10,
+                        StrokeThickness = 6,
                         StrokeStartLineCap = PenLineCap.Square,
                         StrokeEndLineCap = PenLineCap.Square,
                         StrokeLineJoin = PenLineJoin.Round
@@ -801,7 +881,7 @@ namespace DshGui
                     p.StrokeDashArray = new DoubleCollection { l };
                     p.StrokeDashOffset = 1.1 * l;   // 首帧完全隐藏，不露起始点
                     harnessCanvas.Children.Add(p);
-                    drawFigures.Add(new FigureInfo { Path = p, Len = l, Acc = acc, Total = total, Delay = 0.20 + i * LetterGap });
+                    drawFigures.Add(new FigureInfo { Path = p, Len = l, Acc = acc, Total = total, Delay = 0.20 + i * (DrawSeconds + LetterGap) });
                     acc += l;
                 }
             }
@@ -811,7 +891,7 @@ namespace DshGui
             {
                 Text = "DeepSeek Harness · DSH GUI",
                 FontSize = 12,
-                Foreground = new SolidColorBrush(C("#8b96bb")),
+                Foreground = new SolidColorBrush(C(light ? "#5a6a94" : "#8b96bb")),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Bottom,
                 Margin = new Thickness(0, 0, 0, 32),

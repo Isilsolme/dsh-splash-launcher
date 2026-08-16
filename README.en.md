@@ -1,5 +1,7 @@
 # DSH GUI
 
+[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
+
 A one-click Windows launcher for the DeepSeek Harness (`dsh`) Web GUI with a borderless WPF startup animation (stroke-by-stroke "HARNESS" lettering inspired by SPlayer-Next). It starts `dsh web` in the background, preloads the real GUI behind the animation, and fades into it only when the GUI is actually ready. Closing the window stops the service it started.
 
 ## Quick start

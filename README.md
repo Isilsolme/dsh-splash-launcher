@@ -4,7 +4,7 @@
 
 启动动画借鉴 [SPlayer-Next](https://github.com/SPlayer-Dev/SPlayer-Next) 的思路：SVG `stroke-dashoffset` “一笔一划”书写效果——鲸鱼 Logo 升起呼吸，`deepseek` 官方字标浮现，`HARNESS` 七个字母逐笔描边。
 
-![license](https://img.shields.io/badge/license-MIT-blue) ![windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
+![license](https://img.shields.io/badge/license-MIT-blue) ![windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 ## 效果截图
 
@@ -27,6 +27,7 @@
 - **无 PowerShell**：启动器是单个 C#/WPF 程序，无脚本进程，规避“PowerShell 木马”类安全软件启发式误报；
 - **开即启动、关即退出**：窗口关闭后自动结束本次启动的 `dsh web` 服务；端口已有服务时只开窗口、不接管生命周期；
 - **可配置**：工作目录与端口可通过环境变量或 `workspace.txt` 修改；
+- **深浅色跟随**：启动动画跟随 dsh 设置里的“外观”选项（浅色/深色/跟随系统），浅色为接近白色的淡蓝，深色保留原深蓝黑；
 - **开源友好**：单文件 C# 源码 + `build.cmd`，使用 Windows 自带 `csc.exe` 编译，无需外部工具链。
 
 ## 快速开始
@@ -130,10 +131,10 @@ DSH-GUI.exe --selftest
 
 | 想调什么 | 位置 |
 |---|---|
-| 描边速度 | `SplashWindow.DrawSeconds`（默认 1.25s/字母） |
-| 字母间隔 | `SplashWindow.LetterGap`（默认 0.24s） |
+| 描边速度 | `SplashWindow.DrawSeconds`（默认 0.22s/字母，顺序书写） |
+| 字母间隔 | `SplashWindow.LetterGap`（默认 0.04s，字母写完后的停顿） |
 | 动画窗口尺寸 | `Program.WinW / WinH`（默认 1100×720） |
-| 最短动画时长 | `SplashWindow.MinShowSec` |
+| 最短动画时长 | `SplashWindow.MinShowSec`（默认 2.0s） |
 | 就绪判定标题 | `SplashWindow.AppTitle`（按“包含”匹配） |
 
 ## 已知问题
