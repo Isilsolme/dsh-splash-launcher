@@ -4,7 +4,7 @@
 
 启动动画借鉴 [SPlayer-Next](https://github.com/SPlayer-Dev/SPlayer-Next) 的思路：SVG `stroke-dashoffset` “一笔一划”书写效果——鲸鱼 Logo 升起呼吸，`deepseek` 官方字标浮现，`HARNESS` 七个字母逐笔描边。
 
-![license](https://img.shields.io/badge/license-AGPL--3.0-red) ![windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
+![license](https://img.shields.io/badge/license-MIT-blue) ![windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 ## 效果截图
 
@@ -110,7 +110,7 @@ dsh-gui/
 ├─ whale-anim.svg             # 鲸鱼描边动画（可选版式 logo=draw）
 ├─ icons/
 │  └─ whale-black.ico         # 黑鲸图标（exe 与快捷方式共用）
-├─ LICENSE                    # AGPL-3.0 + 品牌素材说明
+├─ LICENSE                    # MIT + 品牌素材说明
 └─ README.md
 ```
 
@@ -162,7 +162,7 @@ WPF 以浏览器窗口标题包含 `DeepSeek Harness` 判定 GUI 就绪；若官
 
 ## 许可证
 
-- 代码：AGPL-3.0，见 [LICENSE](LICENSE)。
+- 代码：MIT，见 [LICENSE](LICENSE)。
 - `whale.png`、`deepseek-wordmark.svg`、`whale-anim.svg` 派生自 DeepSeek Harness（`@deepseek-ai/dsh`，MIT © 2026 DeepSeek）前端素材，保留 DeepSeek 品牌权利；DeepSeek 名称与鲸鱼 Logo 为各自权利人的商标。
 
 ## 致谢

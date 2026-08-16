@@ -40,4 +40,4 @@ Produces a self-contained `DSH-GUI.exe` (black-whale icon, assets embedded as re
 2. Startup takes a while (dsh boot + browser cold start + plugin loading). The animation covers the whole wait and only fades out when the GUI is ready.
 3. Unsigned launchers that start hidden processes / stop process trees may trigger SmartScreen or behavior-based antivirus heuristics; click "More info → Run anyway" on first run, add the folder to your AV exclusions, or code-sign the exe.
 
-See the Chinese [README](README.md) for full details. Code is AGPL-3.0; brand assets derive from DeepSeek Harness (MIT, © 2026 DeepSeek).
+See the Chinese [README](README.md) for full details. Code is MIT; brand assets derive from DeepSeek Harness (MIT, © 2026 DeepSeek).

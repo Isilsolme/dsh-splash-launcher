@@ -34,7 +34,7 @@
     "README.md",
     "LICENSE"
   ],
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Isilsolme/dsh-splash-launcher.git"
