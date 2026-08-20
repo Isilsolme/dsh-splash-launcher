@@ -46,6 +46,7 @@ namespace DshGui
         static string DshBin = "";
         static string DistDir = "";
         static bool ServedOk = false;
+        static bool NoOpenSupported = false;
         static string LastServerError = null;
         static SplashWindow Splash = null;
         static Application UiApp = null;
@@ -134,7 +135,7 @@ namespace DshGui
             {
                 Directory.CreateDirectory(BaseDir);
                 LoadConfig();
-                Log("start, version 1.3");
+                Log("start, version 1.3.0");
 
                 if (PortOpen())
                 {
@@ -450,6 +451,12 @@ namespace DshGui
                 if (!File.Exists(DshBin)) throw new Exception("dsh bin missing: " + DshBin);
 
                 string node = ResolveNodeExe();
+                // dsh >= 0.1.0-rc.7 默认会自动打开系统浏览器；用 --no-open 关掉，
+                // 避免和我们自己打开的 Chrome --app 窗口重复。
+                string help = RunCapture(node, "\"" + DshBin + "\" web --help");
+                NoOpenSupported = help.IndexOf("--no-open", StringComparison.OrdinalIgnoreCase) >= 0;
+                Log("dsh --no-open supported: " + NoOpenSupported);
+
                 string script =
                     "const p = require('path');" +
                     "const r = require('module').createRequire(p.join(process.argv[1], '@deepseek-ai', 'dsh', 'lib', 'bin.js'));" +
@@ -494,7 +501,7 @@ namespace DshGui
                 {
                     Log("node/dsh unavailable, fallback to cmd");
                     LastServerError = "未在 npm 全局目录找到 @deepseek-ai/dsh，请先执行：npm install -g @deepseek-ai/dsh";
-                    ProcessStartInfo fallback = new ProcessStartInfo("cmd.exe", "/c dsh web");
+                    ProcessStartInfo fallback = new ProcessStartInfo("cmd.exe", "/c dsh web" + (NoOpenSupported ? " --no-open" : ""));
                     fallback.WorkingDirectory = Workspace;
                     fallback.CreateNoWindow = true;
                     fallback.UseShellExecute = false;
@@ -502,7 +509,7 @@ namespace DshGui
                     return Process.Start(fallback);
                 }
 
-                ProcessStartInfo psi = new ProcessStartInfo(node, "\"" + DshBin + "\" web");
+                ProcessStartInfo psi = new ProcessStartInfo(node, "\"" + DshBin + "\" web" + (NoOpenSupported ? " --no-open" : ""));
                 psi.WorkingDirectory = Workspace;
                 psi.CreateNoWindow = true;
                 psi.UseShellExecute = false;
