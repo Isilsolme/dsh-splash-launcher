@@ -1,29 +1,19 @@
-// DSH GUI 一键式启动器（C# / WPF，无需 PowerShell）
-// 双击即显示 WPF 即时启动动画；后台启动 dsh web；
-// 服务就绪后打开浏览器同源 splash，由页面后台加载真实 GUI 并在就绪后淡入。
+// DSH GUI 一键式启动器（C#，无需 PowerShell）
+// 双击即打开浏览器 --app 窗口播放 splash 动画（唯一启动画布）；后台启动 dsh web；
+// 服务就绪后把 token 写入 token.js，预热页读到后原地跳到同源 splash，加载真实 GUI 后揭示；关闭窗口停服务。
 // 开源友好：单个 .cs 文件即可用 Windows 自带 csc.exe 编译。
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Management;
 using System.Net.Sockets;
-using Microsoft.Win32;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Media.Effects;
-using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
-using System.Windows.Threading;
 using IOPath = System.IO.Path;
-using ShapePath = System.Windows.Shapes.Path;
 
 namespace DshGui
 {
@@ -32,6 +22,8 @@ namespace DshGui
         static string Workspace = "";
         static int Port = 3080;
         static string Url = "http://127.0.0.1:3080";
+        // alpha.3+ 的 dsh web 用一次性启动 token 换取浏览器 cookie;从服务输出行捕获后注入 splash target
+        static string LaunchToken = null;
         const string SplashStyle = ""; // "&logo=draw" 可切换鲸鱼描边版式
 
         internal static readonly string AppDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -45,11 +37,11 @@ namespace DshGui
         static string NpmRoot = "";
         static string DshBin = "";
         static string DistDir = "";
-        static bool ServedOk = false;
+        static string NodeExe = "";
+        // 路径解析结果缓存：升级 dsh 或删除该文件后会自动重新求解
+        static readonly string ResolveCacheFile = IOPath.Combine(BaseDir, "resolved.cache");
         static bool NoOpenSupported = false;
         static string LastServerError = null;
-        static SplashWindow Splash = null;
-        static Application UiApp = null;
         static int ExitCode = 0;
         static double WinW = 1100;
         static double WinH = 720;
@@ -135,7 +127,7 @@ namespace DshGui
             {
                 Directory.CreateDirectory(BaseDir);
                 LoadConfig();
-                Log("start, version 1.3.0");
+                Log("start, version 1.4.0 (browser-splash mode)");
 
                 if (PortOpen())
                 {
@@ -144,25 +136,17 @@ namespace DshGui
                     return 0;
                 }
 
-                // 立刻显示 WPF 即时启动动画；UI 线程只负责动画，后台线程负责启动编排
-                Assets.Load();
+                // 不用 WPF 动画窗口——浏览器 splash 动画就是唯一的启动画布（浏览器现在启动快，避免双窗口抢层级）。
+                // 这里只计算浏览器 --app 窗口的居中几何。
                 Rect wa = SystemParameters.WorkArea;
                 WinLeft = (int)(wa.Left + (wa.Width - WinW) / 2);
                 WinTop = (int)(wa.Top + (wa.Height - WinH) / 2);
 
-                Splash = new SplashWindow(WinW, WinH);
-                Splash.Left = WinLeft;
-                Splash.Top = WinTop;
-
-                UiApp = new Application();
-                UiApp.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-                Splash.Show();
-
+                // 后台线程负责启动编排；主线程阻塞等它结束（浏览器 GUI 窗口关闭即结束，结束即退出）。
                 Thread worker = new Thread(LauncherWorker);
                 worker.IsBackground = true;
                 worker.Start();
-
-                UiApp.Run();
+                worker.Join();
                 return ExitCode;
             }
             catch (Exception ex)
@@ -173,38 +157,11 @@ namespace DshGui
             }
         }
 
-        static bool BrowserTitleVisible()
-        {
-            foreach (string name in new[] { "msedge", "chrome" })
-            {
-                foreach (Process p in Process.GetProcessesByName(name))
-                {
-                    try { if (p.MainWindowTitle == "DSH") return true; }
-                    catch { }
-                }
-            }
-            return false;
-        }
-
-        static void WaitBrowserTitle(int seconds)
-        {
-            for (int i = 0; i < seconds * 5; i++)
-            {
-                if (BrowserTitleVisible()) return;
-                Thread.Sleep(200);
-            }
-        }
-
         static void LauncherWorker()
         {
             Stopwatch sw = Stopwatch.StartNew();
             try
             {
-                ResolveDshInstall();
-                Log("resolve dsh install: " + sw.ElapsedMilliseconds + "ms");
-                SyncSplashToDist();
-                Log("sync splash to dist: " + sw.ElapsedMilliseconds + "ms");
-
                 // 清理过期 owner 锁
                 try
                 {
@@ -222,7 +179,8 @@ namespace DshGui
 
                 if (File.Exists(LockFile))
                 {
-                    // 另一实例正在启动服务：等待其就绪后只打开窗口
+                    // 另一实例正在启动服务：等它就绪即可——owner 的唯一预热窗会自动跳到同源 GUI，
+                    // 这里不再开第二个窗口，避免重复。
                     Log("another instance is starting the server");
                     bool ready = WaitPort(90);
                     if (!ready)
@@ -231,30 +189,43 @@ namespace DshGui
                         FinishApp(1);
                         return;
                     }
-                    OpenBrowser(ServedOk ? ServedSplashUrl() : FileSplashUrl("0"), true);
-                    WaitBrowserTitle(8);   // 等浏览器窗口出现、WPF 动画自行淡出后再退出
+                    // 等它把 token 写入共享 ServerOut（token.js 由 owner 写，本进程无需再开窗口）
+                    WaitLaunchToken(15);
                     FinishApp(0);
                     return;
                 }
 
+                // 轮换服务输出日志：本轮启动只保留本次 run 的行，
+                // 防止把上一次 run 残留的 token 行误认成当前服务的 token。
+                // 必须在写 owner 锁之前清空：等锁的其它实例从共享日志扫 token 时才不会读到旧行。
+                try { File.WriteAllText(ServerOut, ""); } catch { }
                 File.WriteAllText(LockFile, Process.GetCurrentProcess().Id.ToString());
                 Log("starting dsh web");
+
+                // 尽早打开 file:// splash 预热浏览器，让浏览器冷启动与下面的 dsh 求解 / 服务 boot 重叠（省 1~3s）。
+                // wait=token：这个窗口是唯一窗口，轮询同目录 token.js，读到 token 后原地自跳转到同源 splash。
+                // 先删掉上一轮遗留的 token.js，避免预热页读到旧进程的失效 token（token 是每进程一次的）。
+                try { File.Delete(IOPath.Combine(SplashDir(), "token.js")); } catch { }
+                string prewarmUrl = FileSplashUrl("0") + "&wait=token";
+                Log("prewarm browser: " + sw.ElapsedMilliseconds + "ms -> " + prewarmUrl);
+                OpenBrowser(prewarmUrl, true);
+                Log("browser spawned: " + sw.ElapsedMilliseconds + "ms");
+
+                ResolveDshInstall();
+                Log("resolve dsh install: " + sw.ElapsedMilliseconds + "ms");
+                SyncSplashToDist();
+                Log("sync splash to dist: " + sw.ElapsedMilliseconds + "ms");
 
                 Process server = StartServer();
                 if (server == null)
                 {
+                    KillBrowser();
                     UiMessage(LastServerError ?? "无法启动 dsh web（node 或 dsh 未找到）。", "DSH GUI", MessageBoxImage.Error);
                     try { File.Delete(LockFile); } catch { }
                     FinishApp(1);
                     return;
                 }
                 Log("server process started: " + sw.ElapsedMilliseconds + "ms");
-
-                // 提前打开 file:// splash，让浏览器冷启动与 DSH 服务等待重叠
-                string prewarmUrl = FileSplashUrl(ServedOk ? "1" : "0");
-                Log("prewarm browser: " + sw.ElapsedMilliseconds + "ms -> " + prewarmUrl);
-                OpenBrowser(prewarmUrl, true);
-                Log("browser spawned: " + sw.ElapsedMilliseconds + "ms");
 
                 if (!WaitPort(90))
                 {
@@ -267,11 +238,13 @@ namespace DshGui
                 }
                 Log("server ready: " + sw.ElapsedMilliseconds + "ms");
 
-                // 不依赖 file:// splash 的自动跳转（file:// 探测 http 端口在 Chrome/Edge 里不可靠），
-                // 端口就绪后主动关掉预热窗口，再打开正式的同源 splash。
-                ClosePrewarmBrowser();
-                OpenBrowser(ServedOk ? ServedSplashUrl() : FileSplashUrl("0"), true);
-                Log("browser handoff ready: " + sw.ElapsedMilliseconds + "ms");
+                // 等 token 行落盘(最久 15 秒)
+                WaitLaunchToken(15);
+
+                // 服务就绪 + token 到手：把 token 写进 splash 同目录的 token.js。
+                // 预热窗（唯一窗口）轮询到后原地跳到带 token 的同源 splash——单窗口自跳转，不再"关一个开一个"。
+                WriteLaunchTokenJs();
+                Log("token.js written: " + sw.ElapsedMilliseconds + "ms");
 
                 // 窗口关闭后停止本次启动的服务
                 while (GuiBrowserAlive()) Thread.Sleep(1000);
@@ -283,6 +256,7 @@ namespace DshGui
             catch (Exception ex)
             {
                 Log("ERROR: " + ex);
+                KillBrowser();
                 UiMessage("DSH GUI 启动失败：\n" + ex.Message, "DSH GUI", MessageBoxImage.Error);
                 FinishApp(1);
             }
@@ -290,21 +264,15 @@ namespace DshGui
 
         static void UiMessage(string text, string caption, MessageBoxImage image)
         {
-            try
-            {
-                UiApp.Dispatcher.Invoke(new Action(delegate { MessageBox.Show(text, caption, MessageBoxButton.OK, image); }));
-            }
+            // 无 WPF 消息循环：直接从工作线程弹 MessageBox（Win32 对话框，可在非 UI 线程显示）
+            try { MessageBox.Show(text, caption, MessageBoxButton.OK, image); }
             catch (Exception ex) { Log("message failed: " + ex.Message); }
         }
 
         static void FinishApp(int code)
         {
             ExitCode = code;
-            try
-            {
-                UiApp.Dispatcher.BeginInvoke(new Action(delegate { UiApp.Shutdown(); }));
-            }
-            catch (Exception ex) { Log("shutdown failed: " + ex.Message); }
+            // 无 WPF 消息循环：退出码由 Main 的 worker.Join() 返回（写后 Join 建立 happens-before）
         }
 
         static bool PortOpen()
@@ -357,7 +325,7 @@ namespace DshGui
                 "\" --no-first-run --no-default-browser-check --disable-background-mode --disable-session-crashed-bubble";
             if (useSplashGeometry)
             {
-                // 与 WPF 动画窗口保持同一尺寸与位置，交接时画面完全重叠
+                // 与预热 splash 窗口保持同一尺寸与位置，交接时画面完全重叠
                 args += " --window-size=" + (int)WinW + "," + (int)WinH +
                         " --window-position=" + WinLeft + "," + WinTop;
             }
@@ -365,15 +333,16 @@ namespace DshGui
             Process.Start(new ProcessStartInfo(browser, args) { UseShellExecute = false, CreateNoWindow = true });
         }
 
-        static string ServedSplashUrl()
+        // splash 跳转目标:alpha.3+ 首次进入带 token(服务端换 cookie 后 303 回干净路径),无 token 时退回原行为
+        static string SplashTarget()
         {
-            return Url + "/splash.html?hold=1&target=%2F&timeout=60" + SplashStyle + ThemeQuery();
+            return LaunchToken == null ? Url : Url + "?token=" + LaunchToken;
         }
 
         static string FileSplashUrl(string handoff)
         {
             string file = new Uri(IOPath.Combine(SplashDir(), "splash.html")).AbsoluteUri;
-            return file + "?target=" + Uri.EscapeDataString(Url) + "&timeout=90&handoff=" + handoff + SplashStyle + ThemeQuery();
+            return file + "?target=" + Uri.EscapeDataString(SplashTarget()) + "&timeout=90&handoff=" + handoff + SplashStyle + ThemeQuery();
         }
 
         static string SplashDir()
@@ -413,22 +382,17 @@ namespace DshGui
             {
                 string found = RunCapture("cmd.exe", "/c where node")
                     .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-                if (!string.IsNullOrEmpty(found) && File.Exists(found)) return found;
+                if (!string.IsNullOrEmpty(found) && File.Exists(found)) { NodeExe = found; return found; }
             }
             catch { }
+            NodeExe = "node";
             return "node";
         }
 
         static string ResolveNpmRoot()
         {
-            try
-            {
-                string s = RunCapture("cmd.exe", "/c npm root -g");
-                string root = s.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
-                if (!string.IsNullOrEmpty(root) && Directory.Exists(root)) return root;
-            }
-            catch { }
-            // 兜底：常见全局安装位置
+            // 先探测常见全局目录（秒级，避免每次启动都 spawn `npm root -g`——npm 启动慢且可能被杀软扫描）。
+            // 找不到才用 npm root -g 兜底。
             string[] candidates = {
                 IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "npm", "node_modules"),
                 IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node_modules"),
@@ -438,11 +402,21 @@ namespace DshGui
             {
                 if (Directory.Exists(IOPath.Combine(c, "@deepseek-ai", "dsh"))) return c;
             }
+            try
+            {
+                string s = RunCapture("cmd.exe", "/c npm root -g");
+                string root = s.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+                if (!string.IsNullOrEmpty(root) && Directory.Exists(root)) return root;
+            }
+            catch { }
             return "";
         }
 
         static void ResolveDshInstall()
         {
+            // 命中缓存直接复用，把这段从 1.8~26.8s 压到 ~0ms。
+            // 升级 dsh 后删除 %LocalAppData%\DSH-GUI\resolved.cache 即重算。
+            if (TryLoadResolveCache()) return;
             try
             {
                 NpmRoot = ResolveNpmRoot();
@@ -453,25 +427,88 @@ namespace DshGui
                 string node = ResolveNodeExe();
                 // dsh >= 0.1.0-rc.7 默认会自动打开系统浏览器；用 --no-open 关掉，
                 // 避免和我们自己打开的 Chrome --app 窗口重复。
-                string help = RunCapture(node, "\"" + DshBin + "\" web --help");
-                NoOpenSupported = help.IndexOf("--no-open", StringComparison.OrdinalIgnoreCase) >= 0;
-                Log("dsh --no-open supported: " + NoOpenSupported);
+                // 两个独立的 node 探测并行跑，减少串行等待。
+                var tNoOpen = Task.Factory.StartNew<bool>(delegate
+                {
+                    try
+                    {
+                        string help = RunCapture(node, "\"" + DshBin + "\" web --help");
+                        return help.IndexOf("--no-open", StringComparison.OrdinalIgnoreCase) >= 0;
+                    }
+                    catch { return false; }
+                });
+                var tDist = Task.Factory.StartNew<string>(delegate
+                {
+                    try
+                    {
+                        string script =
+                            "const p = require('path');" +
+                            "const r = require('module').createRequire(p.join(process.argv[1], '@deepseek-ai', 'dsh', 'lib', 'bin.js'));" +
+                            "console.log(p.dirname(r.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')));";
+                        return RunCapture(node, "-e \"" + script + "\" \"" + NpmRoot + "\"")
+                            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+                    }
+                    catch { return (string)null; }
+                });
+                Task.WaitAll(tNoOpen, tDist);
+                NoOpenSupported = tNoOpen.Result;
+                DistDir = tDist.Result;
 
-                string script =
-                    "const p = require('path');" +
-                    "const r = require('module').createRequire(p.join(process.argv[1], '@deepseek-ai', 'dsh', 'lib', 'bin.js'));" +
-                    "console.log(p.dirname(r.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')));";
-                DistDir = RunCapture(node, "-e \"" + script + "\" \"" + NpmRoot + "\"")
-                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+                Log("dsh --no-open supported: " + NoOpenSupported);
                 Log("dsh bin: " + DshBin);
                 Log("dist: " + DistDir);
+                SaveResolveCache();
             }
             catch (Exception ex) { Log("resolve dsh install failed: " + ex.Message); }
         }
 
+        static void SaveResolveCache()
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("node=" + NodeExe);
+                sb.AppendLine("npmRoot=" + NpmRoot);
+                sb.AppendLine("dshBin=" + DshBin);
+                sb.AppendLine("distDir=" + DistDir);
+                sb.AppendLine("noOpen=" + (NoOpenSupported ? "1" : "0"));
+                File.WriteAllText(ResolveCacheFile, sb.ToString(), Encoding.UTF8);
+                Log("resolve cache saved");
+            }
+            catch (Exception ex) { Log("save cache failed: " + ex.Message); }
+        }
+
+        static bool TryLoadResolveCache()
+        {
+            try
+            {
+                if (!File.Exists(ResolveCacheFile)) return false;
+                var map = new Dictionary<string, string>();
+                foreach (string line in File.ReadAllLines(ResolveCacheFile))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    map[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+                }
+                string nm, db, dd;
+                if (!map.TryGetValue("npmRoot", out nm) || string.IsNullOrEmpty(nm) || !Directory.Exists(nm)) return false;
+                if (!map.TryGetValue("dshBin", out db) || string.IsNullOrEmpty(db) || !File.Exists(db)) return false;
+                if (!map.TryGetValue("distDir", out dd) || string.IsNullOrEmpty(dd) || !Directory.Exists(dd)) return false;
+                NodeExe = map.ContainsKey("node") && !string.IsNullOrEmpty(map["node"]) ? map["node"] : "node";
+                // 缓存的绝对 node 路径已失效（升级/卸载）则作废缓存重算
+                if (NodeExe.IndexOf(IOPath.DirectorySeparatorChar) >= 0 && !File.Exists(NodeExe)) return false;
+                NoOpenSupported = map.ContainsKey("noOpen") && map["noOpen"] == "1";
+                NpmRoot = nm;
+                DshBin = db;
+                DistDir = dd;
+                Log("resolve cache hit");
+                return true;
+            }
+            catch (Exception ex) { Log("resolve cache load failed: " + ex.Message); return false; }
+        }
+
         static void SyncSplashToDist()
         {
-            ServedOk = false;
             try
             {
                 if (string.IsNullOrEmpty(DistDir) || !Directory.Exists(DistDir)) throw new Exception("dist missing");
@@ -479,7 +516,6 @@ namespace DshGui
                 {
                     Assets.ExtractTo(DistDir, f);
                 }
-                ServedOk = true;
                 Log("splash synced to dist");
             }
             catch (Exception ex) { Log("sync failed (fallback file mode): " + ex.Message); }
@@ -496,7 +532,7 @@ namespace DshGui
                     Log("workspace missing: " + Workspace);
                     return null;
                 }
-                string node = ResolveNodeExe();
+                string node = string.IsNullOrEmpty(NodeExe) ? ResolveNodeExe() : NodeExe;
                 if (string.IsNullOrEmpty(DshBin) || !File.Exists(DshBin))
                 {
                     Log("node/dsh unavailable, fallback to cmd");
@@ -517,7 +553,7 @@ namespace DshGui
                 psi.RedirectStandardOutput = true;
                 psi.RedirectStandardError = true;
                 Process p = Process.Start(psi);
-                p.OutputDataReceived += (s, e) => { if (e.Data != null) AppendLine(ServerOut, e.Data); };
+                p.OutputDataReceived += (s, e) => { if (e.Data == null) return; AppendLine(ServerOut, e.Data); ExtractLaunchToken(e.Data); };
                 p.ErrorDataReceived += (s, e) => { if (e.Data != null) AppendLine(ServerErr, e.Data); };
                 p.BeginOutputReadLine();
                 p.BeginErrorReadLine();
@@ -535,6 +571,67 @@ namespace DshGui
             try { File.AppendAllText(path, line + Environment.NewLine, Encoding.UTF8); } catch { }
         }
 
+        // alpha.3+ 的 dsh web 会打印 "dsh web: http://127.0.0.1:3080/?token=xxx";
+        // 截取 token(已 URL 编码)供 splash target 注入。旧版 dsh 无此行,保持 null 走原路径。
+        static void ExtractLaunchToken(string line)
+        {
+            if (LaunchToken != null || line == null) return;
+            int at = line.IndexOf("dsh web:", StringComparison.Ordinal);
+            if (at < 0) return;
+            string url = line.Substring(at + 8).Trim();
+            int q = url.IndexOf('?');
+            if (q < 0) return;
+            foreach (string part in url.Substring(q + 1).Split('&'))
+            {
+                int eq = part.IndexOf('=');
+                if (eq <= 0) continue;
+                string val = part.Substring(eq + 1);
+                if (part.Substring(0, eq) == "token" && val.Length > 0)
+                {
+                    LaunchToken = val;
+                    Log("launch token captured");
+                    return;
+                }
+            }
+        }
+
+        // 端口就绪后 token 行可能稍后才打印(树收敛后输出);轮询等待,最长 seconds 秒。
+        // 另一实例启动服务时本进程不捕获其 stdout,从共享的 ServerOut 日志读。
+        static void WaitLaunchToken(int seconds)
+        {
+            for (int i = 0; i < seconds * 5 && LaunchToken == null; i++)
+            {
+                try
+                {
+                    if (File.Exists(ServerOut))
+                        foreach (string line in File.ReadLines(ServerOut)) ExtractLaunchToken(line);
+                }
+                catch { }
+                if (LaunchToken == null) Thread.Sleep(200);
+            }
+            if (LaunchToken == null) Log("launch token not seen (older dsh without token auth?)");
+        }
+
+        // 把 token 写成 splash 同目录的 token.js；预热窗(唯一窗口)轮询到后原地自跳到带 token 的同源 splash。
+        static void WriteLaunchTokenJs()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(LaunchToken)) { Log("no launch token; token.js not written"); return; }
+                string dir = SplashDir();
+                File.WriteAllText(IOPath.Combine(dir, "token.js"),
+                    "window.__DSH_TOKEN='" + EscapeJs(LaunchToken) + "';\n", Encoding.UTF8);
+                Log("token.js -> " + dir);
+            }
+            catch (Exception ex) { Log("write token.js failed: " + ex.Message); }
+        }
+
+        static string EscapeJs(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Replace("\\", "\\\\").Replace("'", "\\'");
+        }
+
         static void KillTree(int pid)
         {
             if (pid <= 0) return;
@@ -548,37 +645,6 @@ namespace DshGui
                 Log("stopped tree " + pid);
             }
             catch (Exception ex) { Log("kill failed: " + ex.Message); }
-        }
-
-        static void ClosePrewarmBrowser()
-        {
-            try
-            {
-                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-                    "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='msedge.exe' OR Name='chrome.exe'"))
-                {
-                    foreach (ManagementObject mo in searcher.Get())
-                    {
-                        string cl = mo["CommandLine"] as string;
-                        // 只关预热窗口：file:// splash 带 handoff=1；正式窗口是 http:// 同源 splash
-                        if (cl != null && cl.Contains("DSH-GUI") && cl.Contains("file:///") && cl.Contains("handoff=1"))
-                        {
-                            uint pid = (uint)mo["ProcessId"];
-                            try
-                            {
-                                ProcessStartInfo psi = new ProcessStartInfo("taskkill.exe", "/PID " + pid + " /T /F");
-                                psi.CreateNoWindow = true;
-                                psi.UseShellExecute = false;
-                                psi.WindowStyle = ProcessWindowStyle.Hidden;
-                                using (Process p = Process.Start(psi)) { p.WaitForExit(3000); }
-                            }
-                            catch { }
-                        }
-                    }
-                }
-                Log("closed prewarm browser");
-            }
-            catch (Exception ex) { Log("close prewarm browser failed: " + ex.Message); }
         }
 
         static void KillBrowser()
@@ -643,8 +709,8 @@ namespace DshGui
             StringBuilder sb = new StringBuilder();
             try
             {
-                Assets.Load();
-                sb.AppendLine("assets OK: letters=" + Assets.Letters.Count + " wordmark=" + Assets.Wordmark.Count);
+                // 校验内嵌素材可读取（WPF 几何解析已移除，只核对素材字节数）
+                sb.AppendLine("splash.html=" + Assets.ReadText("splash.html").Length + "B, deepseek-wordmark.svg=" + Assets.ReadText("deepseek-wordmark.svg").Length + "B");
                 sb.AppendLine("embedded resources: " + string.Join(",", typeof(Program).Assembly.GetManifestResourceNames()));
                 ResolveDshInstall();
                 sb.AppendLine("dshBin=" + DshBin);
@@ -667,13 +733,6 @@ namespace DshGui
 
     public static class Assets
     {
-        public static Geometry Whale;
-        public static List<Geometry> Wordmark = new List<Geometry>();
-        public static List<Geometry> Letters = new List<Geometry>();
-        public static List<double> LetterLengths = new List<double>();
-        public static List<List<Geometry>> LetterFigures = new List<List<Geometry>>();
-        public static List<List<double>> LetterFigureLengths = new List<List<double>>();
-
         // 读取素材：优先 exe 同目录磁盘文件（可自定义），否则使用内嵌资源（便携单文件）
         public static Stream Open(string name)
         {
@@ -702,430 +761,6 @@ namespace DshGui
             }
         }
 
-        public static void Load()
-        {
-            Whale = null;
-            Wordmark.Clear();
-            Letters.Clear();
-            LetterLengths.Clear();
-            LetterFigures.Clear();
-            LetterFigureLengths.Clear();
-
-            string whaleSvg = ReadText("whale-anim.svg");
-            Match wm = Regex.Match(whaleSvg, "<path class=\"ink\" d=\"([^\"]+)\"");
-            if (!wm.Success) throw new Exception("whale path not found");
-            string whaleD = Normalize(wm.Groups[1].Value);
-            Whale = Geometry.Parse(whaleD);
-
-            string wordmark = ReadText("deepseek-wordmark.svg");
-            foreach (Match m in Regex.Matches(wordmark, "<path d=\"([^\"]+)\""))
-            {
-                Wordmark.Add(Geometry.Parse(m.Groups[1].Value));
-            }
-            if (Wordmark.Count != 9) throw new Exception("wordmark path count=" + Wordmark.Count);
-
-            string html = ReadText("splash.html");
-            MatchCollection letterMatches = Regex.Matches(html, "<path class=\"letter\"[^>]*d=\"([^\"]+)\"");
-            if (letterMatches.Count != 7) throw new Exception("letter count=" + letterMatches.Count);
-            foreach (Match m in letterMatches)
-            {
-                Geometry g = Geometry.Parse(m.Groups[1].Value);
-                Letters.Add(g);
-                PathGeometry pg = PathGeometry.CreateFromGeometry(g);
-                List<Geometry> figs = new List<Geometry>();
-                List<double> lens = new List<double>();
-                double total = 0;
-                foreach (PathFigure f in pg.Figures)
-                {
-                    PathGeometry one = new PathGeometry();
-                    one.Figures.Add(f);
-                    double l = PathLength(one);
-                    figs.Add(one);
-                    lens.Add(l);
-                    total += l;
-                }
-                LetterFigures.Add(figs);
-                LetterFigureLengths.Add(lens);
-                LetterLengths.Add(total);
-            }
-        }
-
-        static string Normalize(string d)
-        {
-            string d2 = Regex.Replace(d, "(?<![eE])(?<=\\d)-", " -");
-            return Regex.Replace(d2, "(?<![eE])(?<=\\.)-", " -");
-        }
-
-        public static double PathLength(Geometry geo)
-        {
-            double len = 0;
-            PathGeometry flat = geo.GetFlattenedPathGeometry(0.05, ToleranceType.Relative);
-            foreach (PathFigure fig in flat.Figures)
-            {
-                Point prev = fig.StartPoint;
-                foreach (PathSegment seg in fig.Segments)
-                {
-                    if (seg is LineSegment)
-                    {
-                        LineSegment ls = (LineSegment)seg;
-                        len += Dist(prev, ls.Point);
-                        prev = ls.Point;
-                    }
-                    else if (seg is PolyLineSegment)
-                    {
-                        PolyLineSegment pl = (PolyLineSegment)seg;
-                        foreach (Point pt in pl.Points)
-                        {
-                            len += Dist(prev, pt);
-                            prev = pt;
-                        }
-                    }
-                }
-            }
-            return len;
-        }
-
-        static double Dist(Point a, Point b)
-        {
-            double dx = a.X - b.X, dy = a.Y - b.Y;
-            return Math.Sqrt(dx * dx + dy * dy);
-        }
     }
 
-    public class SplashWindow : Window
-    {
-        const string BrowserTitle = "DSH";
-        const string AppTitle = "DeepSeek Harness";
-        const double MinShowSec = 2.0;
-        const double MaxLifeSec = 45;
-        const double DrawSeconds = 0.22;   // 单字母描边时长
-        const double LetterStep = 0.14;    // 相邻字母起笔间隔（小于 DrawSeconds，重叠连续运笔）
-
-        class FigureInfo
-        {
-            public ShapePath Path;
-            public double Len;
-            public double Acc;
-            public double Total;
-            public double Delay;
-        }
-
-        readonly List<FigureInfo> drawFigures = new List<FigureInfo>();
-
-        // 跟随 Windows 应用深浅色：HKCU\...\Themes\Personalize\AppsUseLightTheme
-        static bool IsSystemLightTheme()
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
-                {
-                    if (key != null)
-                    {
-                        object v = key.GetValue("AppsUseLightTheme");
-                        if (v != null) return Convert.ToInt32(v) == 1;
-                    }
-                }
-            }
-            catch { }
-            return false;   // 默认深色
-        }
-
-        // 跟随 dsh 外观设置：light/dark/system；system 时再跟随 Windows 应用深浅色
-        static bool IsLightTheme()
-        {
-            string pref = Program.ReadDshThemePreference();
-            if (pref == "light") return true;
-            if (pref == "dark") return false;
-            return IsSystemLightTheme();
-        }
-
-        public SplashWindow(double width = 960, double height = 640)
-        {
-            Width = width;
-            Height = height;
-            WindowStyle = WindowStyle.None;   // 无边框，启动期间像一张全屏动画卡
-            AllowsTransparency = false;
-            Background = new SolidColorBrush(C(IsLightTheme() ? "#f4f8ff" : "#070b18"));
-            Topmost = true;
-            ShowInTaskbar = false;
-            ResizeMode = ResizeMode.NoResize;
-            WindowStartupLocation = WindowStartupLocation.Manual;
-            Title = BrowserTitle;
-            Content = BuildRoot();
-        }
-
-        static Color C(string hex) { return (Color)ColorConverter.ConvertFromString(hex); }
-
-        FrameworkElement BuildRoot()
-        {
-            Grid root = new Grid();
-            bool light = IsLightTheme();
-
-            Rectangle bg = new Rectangle();
-            LinearGradientBrush bgBrush = new LinearGradientBrush();
-            bgBrush.StartPoint = new Point(0, 0);
-            bgBrush.EndPoint = new Point(0, 1);
-            bgBrush.GradientStops.Add(new GradientStop(C(light ? "#f4f8ff" : "#070b18"), 0));
-            bgBrush.GradientStops.Add(new GradientStop(C(light ? "#eaf2ff" : "#0a1024"), 0.55));
-            bgBrush.GradientStops.Add(new GradientStop(C(light ? "#f4f8ff" : "#070b18"), 1));
-            bg.Fill = bgBrush;
-            root.Children.Add(bg);
-
-            root.Children.Add(Blob(560, "#4d6bfe", 0.30, HorizontalAlignment.Left, VerticalAlignment.Top, new Thickness(-160, -140, 0, 0)));
-            root.Children.Add(Blob(580, "#22d3ee", 0.18, HorizontalAlignment.Right, VerticalAlignment.Bottom, new Thickness(0, 0, -200, -220)));
-
-            StackPanel stage = new StackPanel();
-            stage.VerticalAlignment = VerticalAlignment.Center;
-            stage.HorizontalAlignment = HorizontalAlignment.Center;
-            root.Children.Add(stage);
-
-            // 鲸鱼：升起 + 呼吸闪烁
-            Canvas whaleOuter = new Canvas { Width = 72, Height = 72, HorizontalAlignment = HorizontalAlignment.Center };
-            Canvas whaleInner = new Canvas { Width = 72, Height = 72 };
-            ShapePath whalePath = new ShapePath
-            {
-                Data = Assets.Whale,
-                Fill = new SolidColorBrush(C(light ? "#1b2a5b" : "#ffffff")),
-                RenderTransform = new ScaleTransform(72.0 / 50.0, 72.0 / 50.0)
-            };
-            whaleInner.Children.Add(whalePath);
-            whaleOuter.Children.Add(whaleInner);
-            stage.Children.Add(whaleOuter);
-
-            CubicEase easeOut = new CubicEase { EasingMode = EasingMode.EaseOut };
-            TranslateTransform whaleRise = new TranslateTransform(0, 12);
-            whaleOuter.RenderTransform = whaleRise;
-            whaleOuter.Opacity = 0;
-            Animate(whaleOuter, UIElement.OpacityProperty, 0, 1, 0.5, 0, easeOut, false);
-            Animate(whaleRise, TranslateTransform.YProperty, 12, 0, 0.5, 0, easeOut, false);
-            DoubleAnimation flicker = new DoubleAnimation(1, 0.6, TimeSpan.FromSeconds(0.9));
-            flicker.AutoReverse = true;
-            flicker.RepeatBehavior = RepeatBehavior.Forever;
-            flicker.BeginTime = TimeSpan.FromSeconds(0.5);
-            whaleInner.BeginAnimation(UIElement.OpacityProperty, flicker);
-
-            // 品牌行：deepseek | HARNESS
-            StackPanel brandRow = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 18, 0, 0)
-            };
-            stage.Children.Add(brandRow);
-
-            Canvas wordCanvas = new Canvas { Width = 234, Height = 58, Margin = new Thickness(0, 4, 0, 0) };
-            double wordScale = 234.0 / 97.0;
-            TransformGroup wordGroup = new TransformGroup();
-            // 先缩放再平移：与 SVG viewBox="26 0 97 24" 的裁剪语义一致，
-            // 否则 deepseek 字标会被错误地裁掉左半边、整体偏左
-            wordGroup.Children.Add(new ScaleTransform(wordScale, 58.0 / 24.0));
-            wordGroup.Children.Add(new TranslateTransform(-26 * wordScale, 0));
-            foreach (Geometry wg in Assets.Wordmark)
-            {
-                wordCanvas.Children.Add(new ShapePath { Data = wg, Fill = new SolidColorBrush(C(light ? "#1b2a5b" : "#E7ECFF")), RenderTransform = wordGroup });
-            }
-            wordCanvas.Opacity = 0;
-            TranslateTransform wordRise = new TranslateTransform(0, 12);
-            wordCanvas.RenderTransform = wordRise;
-            brandRow.Children.Add(wordCanvas);
-            Animate(wordCanvas, UIElement.OpacityProperty, 0, 1, 0.5, 0.1, easeOut, false);
-            Animate(wordRise, TranslateTransform.YProperty, 12, 0, 0.5, 0.1, easeOut, false);
-
-            Canvas harnessCanvas = new Canvas { Width = 310, Height = 62, Margin = new Thickness(14, 0, 0, 0) };
-            ScaleTransform harnessScale = new ScaleTransform(310.0 / 700.0, 62.0 / 140.0);
-            LinearGradientBrush hGrad = new LinearGradientBrush();
-            // 与 splash.html 的 userSpaceOnUse 渐变一致：整行 HARNESS 共享一条从左到右的渐变
-            hGrad.MappingMode = BrushMappingMode.Absolute;
-            hGrad.StartPoint = new Point(0, 20);
-            hGrad.EndPoint = new Point(700, 120);
-            hGrad.GradientStops.Add(new GradientStop(C(light ? "#5b7cfa" : "#a7c0ff"), 0));
-            hGrad.GradientStops.Add(new GradientStop(C("#4d6bfe"), 0.5));
-            hGrad.GradientStops.Add(new GradientStop(C(light ? "#0e9bb8" : "#22d3ee"), 1));
-
-            for (int i = 0; i < Assets.Letters.Count; i++)
-            {
-                double total = Assets.LetterLengths[i];
-                double acc = 0;
-                for (int j = 0; j < Assets.LetterFigures[i].Count; j++)
-                {
-                    // 每个子路径一段 dash；由 OnContentRendered 的绘制计时器统一推进，
-                    // 用整字母的 CSS ease 曲线换算“笔尖已走距离”，与浏览器 SVG 版手感一致
-                    ShapePath p = new ShapePath
-                    {
-                        Data = Assets.LetterFigures[i][j],
-                        RenderTransform = harnessScale,
-                        Stroke = hGrad,
-                        StrokeThickness = 6,
-                        StrokeStartLineCap = PenLineCap.Square,
-                        StrokeEndLineCap = PenLineCap.Square,
-                        StrokeLineJoin = PenLineJoin.Round
-                    };
-                    double l = Assets.LetterFigureLengths[i][j];
-                    p.StrokeDashArray = new DoubleCollection { l };
-                    p.StrokeDashOffset = 1.1 * l;   // 首帧完全隐藏，不露起始点
-                    harnessCanvas.Children.Add(p);
-                    drawFigures.Add(new FigureInfo { Path = p, Len = l, Acc = acc, Total = total, Delay = 0.20 + i * LetterStep });
-                    acc += l;
-                }
-            }
-            brandRow.Children.Add(harnessCanvas);
-
-            TextBlock footer = new TextBlock
-            {
-                Text = "DeepSeek Harness · DSH GUI",
-                FontSize = 12,
-                Foreground = new SolidColorBrush(C(light ? "#5a6a94" : "#8b96bb")),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Bottom,
-                Margin = new Thickness(0, 0, 0, 32),
-                Opacity = 0
-            };
-            root.Children.Add(footer);
-            Animate(footer, UIElement.OpacityProperty, 0, 0.4, 0.5, 0.36, easeOut, false);
-
-            return root;
-        }
-
-        static void Animate(UIElement target, DependencyProperty prop, double from, double to, double sec, double delay, IEasingFunction ease, bool repeat)
-        {
-            DoubleAnimation a = new DoubleAnimation(from, to, TimeSpan.FromSeconds(sec));
-            a.EasingFunction = ease;
-            a.BeginTime = TimeSpan.FromSeconds(delay);
-            a.FillBehavior = FillBehavior.HoldEnd;
-            if (repeat) a.RepeatBehavior = RepeatBehavior.Forever;
-            target.BeginAnimation(prop, a);
-        }
-
-        static void Animate(Animatable target, DependencyProperty prop, double from, double to, double sec, double delay, IEasingFunction ease, bool repeat)
-        {
-            DoubleAnimation a = new DoubleAnimation(from, to, TimeSpan.FromSeconds(sec));
-            a.EasingFunction = ease;
-            a.BeginTime = TimeSpan.FromSeconds(delay);
-            a.FillBehavior = FillBehavior.HoldEnd;
-            if (repeat) a.RepeatBehavior = RepeatBehavior.Forever;
-            target.BeginAnimation(prop, a);
-        }
-
-        static FrameworkElement Blob(double size, string colorHex, double opacity,
-            HorizontalAlignment halign, VerticalAlignment valign, Thickness margin)
-        {
-            Color c = C(colorHex);
-            RadialGradientBrush brush = new RadialGradientBrush();
-            brush.GradientStops.Add(new GradientStop(c, 0));
-            brush.GradientStops.Add(new GradientStop(Color.FromArgb(0, c.R, c.G, c.B), 1));
-            Ellipse e = new Ellipse
-            {
-                Width = size,
-                Height = size,
-                Fill = brush,
-                Opacity = opacity,
-                Effect = new BlurEffect { Radius = 40 },
-                HorizontalAlignment = halign,
-                VerticalAlignment = valign,
-                Margin = margin
-            };
-            return e;
-        }
-
-        // CSS ease = cubic-bezier(0.25, 0.1, 0.25, 1)，与 splash.html 的 stroke 动画同款
-        static double CssEase(double x)
-        {
-            double x1 = 0.25, y1 = 0.1, x2 = 0.25, y2 = 1.0;
-            double t = x;
-            for (int i = 0; i < 8; i++)
-            {
-                double bx = 3 * (1 - t) * (1 - t) * t * x1 + 3 * (1 - t) * t * t * x2 + t * t * t;
-                double dx = 3 * (1 - t) * (1 - t) * x1 + 6 * (1 - t) * t * (x2 - x1) + 3 * t * t * (1 - x2);
-                double err = bx - x;
-                if (Math.Abs(err) < 1e-6) break;
-                if (Math.Abs(dx) < 1e-6) break;
-                t -= err / dx;
-            }
-            t = Math.Max(0, Math.Min(1, t));
-            return 3 * (1 - t) * (1 - t) * t * y1 + 3 * (1 - t) * t * t * y2 + t * t * t;
-        }
-
-        static double Clamp01(double v) { return Math.Max(0, Math.Min(1, v)); }
-
-        protected override void OnContentRendered(EventArgs e)
-        {
-            base.OnContentRendered(e);
-            DateTime started = DateTime.Now;
-            bool closing = false;
-
-            // 16ms 绘制计时器：统一推进每个子路径的 dashoffset，笔尖连续、无接力生硬感
-            DispatcherTimer drawTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
-            drawTimer.Tick += delegate
-            {
-                if (closing) return;
-                double elapsed = (DateTime.Now - started).TotalSeconds;
-                foreach (FigureInfo fig in drawFigures)
-                {
-                    double p = Clamp01((elapsed - fig.Delay) / DrawSeconds);
-                    double l = fig.Len;
-                    if (p <= 0)
-                    {
-                        fig.Path.StrokeDashOffset = 1.1 * l;
-                        continue;
-                    }
-                    double s = p * fig.Total;   // 本字母“笔尖”走过的总长度（linear 线性速度）
-                    double x = s - fig.Acc;              // 本段内走过的长度
-                    if (x <= 0)
-                    {
-                        fig.Path.StrokeDashOffset = 1.05 * l;   // 尚未轮到：完全隐藏
-                    }
-                    else if (x >= l)
-                    {
-                        fig.Path.StrokeDashOffset = 0.8 * l;    // 已走完：完整显示
-                    }
-                    else
-                    {
-                        fig.Path.StrokeDashOffset = l - x / 5.0; // 笔尖正在本段内前进
-                    }
-                }
-            };
-            drawTimer.Start();
-
-            // 浏览器窗口真正加载完 GUI 后（标题变为 DeepSeek Harness）再淡出
-            DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-            timer.Tick += delegate
-            {
-                if (closing) return;
-                double elapsed = (DateTime.Now - started).TotalSeconds;
-                bool appUp = false;
-                foreach (string name in new[] { "msedge", "chrome" })
-                {
-                    foreach (Process p in Process.GetProcessesByName(name))
-                    {
-                        try
-                        {
-                            string t = p.MainWindowTitle;
-                            // 应用标题形如 "新对话 - DeepSeek Harness"，splash 阶段则是 "DSH"
-                            if (!string.IsNullOrEmpty(t) && t != BrowserTitle && t.Contains(AppTitle))
-                            {
-                                appUp = true;
-                                break;
-                            }
-                        }
-                        catch { }
-                    }
-                    if (appUp) break;
-                }
-                if ((appUp && elapsed >= MinShowSec) || elapsed >= MaxLifeSec)
-                {
-                    if (appUp)
-                        Program.Log("splash appUp after " + elapsed.ToString("0.00") + "s");
-                    else
-                        Program.Log("splash maxlife reached after " + elapsed.ToString("0.00") + "s");
-                    closing = true;
-                    drawTimer.Stop();
-                    timer.Stop();
-                    DoubleAnimation fade = new DoubleAnimation(1, 0, TimeSpan.FromSeconds(0.25));
-                    fade.Completed += delegate { Close(); };
-                    BeginAnimation(Window.OpacityProperty, fade);
-                }
-            };
-            timer.Start();
-        }
-    }
 }

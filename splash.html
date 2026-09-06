@@ -155,14 +155,14 @@
     filter: var(--logo-filter);
     will-change: transform, opacity;
     animation:
-      splash-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both,
+      splash-rise 0.4s cubic-bezier(0.16, 1, 0.3, 1) both,
       splash-flicker 1.8s ease-in-out 0.5s infinite;
   }
   .splash-logo.draw {
     width: 96px;
     height: 96px;
     filter: none;
-    animation: splash-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation: splash-rise 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
 
   .splash-brand {
@@ -179,7 +179,7 @@
     margin-top: 4px;
     filter: var(--wordmark-filter);
     will-change: transform, opacity;
-    animation: splash-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
+    animation: splash-rise 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.08s both;
   }
 
   /* “HARNESS”七个字母：与 SPlayer-Next 的 Next 相同的描边动画，作为视觉重点 */
@@ -196,16 +196,16 @@
     stroke-dasharray: 400;
     stroke-dashoffset: 400;
     will-change: stroke-dashoffset;
-    /* 每个字母 0.22s，前一个未写完下一个就开始，linear 线性速度，整体约 1.3s */
-    animation: splash-draw 0.22s linear forwards;
+    /* 每个字母 0.22s -> 1.25x 加快即 0.176s；前一个未写完下一个就开始，linear 线性速度，整体约 1.0s */
+    animation: splash-draw 0.176s linear forwards;
   }
-  .splash-harness path:nth-of-type(1) { animation-delay: 0.20s; }
-  .splash-harness path:nth-of-type(2) { animation-delay: 0.34s; }
-  .splash-harness path:nth-of-type(3) { animation-delay: 0.48s; }
-  .splash-harness path:nth-of-type(4) { animation-delay: 0.62s; }
-  .splash-harness path:nth-of-type(5) { animation-delay: 0.76s; }
-  .splash-harness path:nth-of-type(6) { animation-delay: 0.90s; }
-  .splash-harness path:nth-of-type(7) { animation-delay: 1.04s; }
+  .splash-harness path:nth-of-type(1) { animation-delay: 0.16s; }
+  .splash-harness path:nth-of-type(2) { animation-delay: 0.27s; }
+  .splash-harness path:nth-of-type(3) { animation-delay: 0.38s; }
+  .splash-harness path:nth-of-type(4) { animation-delay: 0.50s; }
+  .splash-harness path:nth-of-type(5) { animation-delay: 0.61s; }
+  .splash-harness path:nth-of-type(6) { animation-delay: 0.72s; }
+  .splash-harness path:nth-of-type(7) { animation-delay: 0.83s; }
 
   /* 浅色模式下换用更深的渐变，保证 HARNESS 在接近白色的背景上清晰可见 */
   @media (prefers-color-scheme: light) {
@@ -230,7 +230,7 @@
     font-size: 12px;
     letter-spacing: 2px;
     color: var(--muted);
-    animation: splash-rise-footer 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.36s both;
+    animation: splash-rise-footer 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.288s both;
   }
 
   /* hold 模式：直接呈现动画结束态（WPF 即时启动页 → 浏览器启动页无缝衔接） */
@@ -318,6 +318,11 @@
   var timeoutSec = Math.max(15, parseInt(qs.get('timeout') || '90', 10) || 90);
   // 双击 splash.html 打开（无参数）= 动画循环预览
   var demo = qs.get('demo') === '1' || !qs.has('target');
+  // 预热窗口专用：只播放动画，不探测端口、不自行跳转，由启动器手动接管交接
+  var stay = qs.get('stay') === '1';
+  // wait=token：预热窗口轮询同目录 token.js（由启动器在服务就绪+拿到 token 后写入），
+  // 读到 token 即代表服务就绪，原地自跳转到带 token 的同源 splash——单窗口、无缝、无闪烁。
+  var waitToken = qs.get('wait') === 'token';
   // logo=draw：切换成鲸鱼本体一笔一划的旧版式
   var drawLogo = qs.get('logo') === 'draw';
   // 由 dsh 服务托管（同源）：可后台 iframe 加载真实 GUI 并检测就绪
@@ -340,6 +345,46 @@
 
   if (demo) {
     setInterval(function () { location.reload(); }, 9000);
+    return;
+  }
+
+  if (stay) {
+    // 预热窗口只做动画展示，交给启动器 ClosePrewarmBrowser 关闭并打开正式窗口
+    return;
+  }
+
+  if (waitToken) {
+    // 单窗口自跳转：轮询同目录 token.js，拿到 token 后原地跳到带 token 的同源 splash。
+    // token 本身就是"服务已就绪"的信号（启动器只在 WaitPort+WaitLaunchToken 成功后写入）。
+    var base0 = target.replace(/\/+$/, '');
+    var navServed = function (token) {
+      if (leaving) return;
+      leaving = true;
+      var servedUrl = base0 + '/splash.html?hold=1&timeout=60'
+        + '&target=' + encodeURIComponent(target + '?token=' + encodeURIComponent(token))
+        + (drawLogo ? '&logo=draw' : '')
+        + (theme ? '&theme=' + encodeURIComponent(theme) : '');
+      location.replace(servedUrl);
+    };
+    var pollToken = function () {
+      if (leaving) return;
+      if (window.__DSH_TOKEN) { navServed(window.__DSH_TOKEN); return; }
+      if ((performance.now() - startedAt) > timeoutSec * 1000) {
+        // 兜底：极低概率 token 一直没来，直接进 target（无 token 可能 401，但已属异常兜底）
+        leaving = true; location.replace(target);
+        return;
+      }
+      var s = document.createElement('script');
+      s.src = 'token.js?v=' + Date.now();
+      s.onload = function () {
+        if (window.__DSH_TOKEN) { navServed(window.__DSH_TOKEN); }
+        else setTimeout(pollToken, 300);
+      };
+      s.onerror = function () { setTimeout(pollToken, 300); };
+      document.head.appendChild(s);
+      setTimeout(pollToken, 600);
+    };
+    pollToken();
     return;
   }
 
@@ -408,8 +453,10 @@
   }
 
   if (served) {
-    /* 同源模式：后台加载真实 GUI，真正就绪后再揭示 */
-    frame.src = '/';
+    /* 同源模式：后台加载真实 GUI，真正就绪后再揭示。
+       alpha.3+ 的根路径需要 token 认证：target 携带 token 时首次加载完成换 cookie，
+       服务端 303 回到干净根路径；无 target 参数时退回原来的 '/'。 */
+    frame.src = target;
     var minBeforeReveal = hold ? 250 : splashAnimMs;
     var revealDeadline = startedAt + timeoutSec * 1000;
     (function watch() {
@@ -430,7 +477,8 @@
         if (up && elapsed >= splashAnimMs) {
           if (handoff) {
             var base = target.replace(/\/+$/, '');
-            fadeAndGo(base + '/splash.html?hold=1&timeout=60' + (drawLogo ? '&logo=draw' : ''));
+            // 把带 token 的 target 传给同源 splash，alpha.3+ 的根路径认证才能通过
+            fadeAndGo(base + '/splash.html?hold=1&timeout=60&target=' + encodeURIComponent(target) + (drawLogo ? '&logo=draw' : ''));
           } else {
             fadeAndGo(target);
           }

@@ -1,6 +1,6 @@
 # DSH GUI
 
-> DeepSeek Harness（dsh）Web GUI 的 Windows 一键启动器：双击即弹出无边框启动动画，后台拉起 `dsh web`，GUI 真正加载完成后无缝淡入；关闭窗口自动停服务。
+> DeepSeek Harness（dsh）Web GUI 的 Windows 一键启动器：双击即用浏览器 `--app` 窗口的 splash 动画作为唯一启动画布，后台拉起 `dsh web`，GUI 就绪后揭示；关闭窗口自动停服务。
 
 启动动画借鉴 [SPlayer-Next](https://github.com/SPlayer-Dev/SPlayer-Next) 的思路：SVG `stroke-dashoffset` “一笔一划”书写效果——鲸鱼 Logo 升起呼吸，`deepseek` 官方字标浮现，`HARNESS` 七个字母逐笔描边。
 
@@ -8,7 +8,7 @@
 
 ## 效果截图
 
-**启动动画（WPF 无边框，HARNESS 逐笔描边）**
+**启动动画（浏览器 splash，HARNESS 逐笔描边）**
 
 ![启动动画](docs/screenshots/startup-animation.png)
 
@@ -20,11 +20,11 @@
 
 ## 功能特性
 
-- **点击即出动画**：WPF 原生动画窗口，不等待浏览器冷启动，双击后立刻播放；
+- **点击即出动画**：以浏览器 splash 动画作为唯一启动画布，双击后立刻打开动画，无双层窗口互相抢层级；
 - **便携单文件**：`splash.html` 与 SVG/PNG 素材内嵌进 exe，`DSH-GUI.exe` 单独一个文件即可运行；同目录放置同名素材文件可覆盖内嵌版本（自定义动画，无需重编译）；
 - **一笔一划描边**：`HARNESS` 七个字母按 CSS `cubic-bezier(0.25,0.1,0.25,1)` 缓动逐笔书写，笔尖连续、首帧空白；
 - **后台加载、就绪切换**：启动动画期间，真实 GUI 在浏览器后台（同源 iframe）完成加载，检测到官方启动页（`Loading plugins…`）消失后才淡出动画，不会出现“动画播完又加载”的断档；
-- **无 PowerShell**：启动器是单个 C#/WPF 程序，无脚本进程，规避“PowerShell 木马”类安全软件启发式误报；
+- **无 PowerShell**：启动器是单个 C# 程序，无脚本进程，规避“PowerShell 木马”类安全软件启发式误报；
 - **开即启动、关即退出**：窗口关闭后自动结束本次启动的 `dsh web` 服务；端口已有服务时只开窗口、不接管生命周期；
 - **可配置**：工作目录与端口可通过环境变量或 `workspace.txt` 修改；
 - **深浅色跟随**：启动动画跟随 dsh 设置里的“外观”选项（浅色/深色/跟随系统），浅色为接近白色的淡蓝，深色保留原深蓝黑；
@@ -86,15 +86,15 @@ dsh plugin --profile web add dsh-splash-launcher
 双击 DSH-GUI.exe
   ├─ 端口已占用 ────────────────→ 直接打开 GUI 窗口（不显示动画、不接管服务）
   └─ 端口空闲
-       ├─ 立即显示 WPF 无边框启动动画（≈0ms，不等浏览器）
-       ├─ 解析 dsh 安装路径（npm root -g + node require.resolve）
-       ├─ 将 splash 素材同步进 dsh-web-frontend/dist（同源 iframe 探测的前提）
+       ├─ 路径解析（缓存命中则 ~0ms；否则已知目录探测 + 并行解析，写入 resolved.cache）
+       ├─ 先打开浏览器 `--app` 窗口（file:// splash 动画，作为唯一启动画布，wait=token 模式）
+       ├─ 将 splash 素材同步进 dsh-web-frontend/dist（同源 splash.html 的前提）
        ├─ 后台启动 `node <dsh>/lib/bin.js web`（隐藏窗口）
        ├─ 轮询端口就绪（最多 90s）
-       ├─ 以相同尺寸/位置在动画背后打开浏览器 `--app` 窗口
+       ├─ 就绪后把 token 写入 splash 同目录 token.js
+       ├─ 预热页轮询到 token → 原地自跳转到同源 splash（hold 态，单窗口、无跳窗闪烁）
        │     └─ splash.html(hold) 用隐藏 iframe 加载 `/`
        │     └─ 检测到官方启动卡片消失 → 揭示 iframe，并同步标题
-       ├─ WPF 检测到浏览器标题包含 "DeepSeek Harness" → 淡出动画
        └─ 浏览器窗口关闭 → taskkill 结束本次 dsh web 进程树
 ```
 
@@ -102,7 +102,7 @@ dsh plugin --profile web add dsh-splash-launcher
 
 ```
 dsh-gui/
-├─ DSH-GUI.cs                 # 启动器全部源码（C# 5 / WPF，单文件）
+├─ DSH-GUI.cs                 # 启动器全部源码（C# 5，单文件）
 ├─ build.cmd                  # 构建脚本（Windows 自带 csc.exe）
 ├─ splash.html                # 浏览器侧启动页（hold 态 + 后台 iframe 预加载 + 就绪检测）
 ├─ deepseek-wordmark.svg      # 官方 deepseek 字标（提取自 dsh 前端）
@@ -131,19 +131,18 @@ DSH-GUI.exe --selftest
 
 | 想调什么 | 位置 |
 |---|---|
-| 描边速度 | `SplashWindow.DrawSeconds`（默认 0.22s/字母，线性速度） |
-| 相邻字母起笔间隔 | `SplashWindow.LetterStep`（默认 0.14s，重叠书写） |
-| 动画窗口尺寸 | `Program.WinW / WinH`（默认 1100×720） |
-| 最短动画时长 | `SplashWindow.MinShowSec`（默认 2.0s） |
-| 就绪判定标题 | `SplashWindow.AppTitle`（按“包含”匹配） |
+| 描边速度 | `splash.html` 的 `.splash-harness .letter` `animation` 时长（0.22s/字母） |
+| 相邻字母起笔间隔 | `splash.html` 的 `.splash-harness path:nth-of-type(n)` `animation-delay` |
+| 动画/浏览器窗口尺寸 | `Program.WinW / WinH`（默认 1100×720，`DSH-GUI.cs`） |
+| 版式（鲸鱼描边） | `Program.SplashStyle` 改为 `"&logo=draw"`（`DSH-GUI.cs`） |
 
 ## 已知问题
 
 ### 1. 任务栏图标会先闪一下 Chrome/Edge 默认图标
-浏览器 `--app` 窗口创建时，任务栏按钮先使用浏览器进程自带图标，页面 `favicon`（黑鲸）加载完成后才切换，因此会出现极短暂的一闪。这是浏览器自身的图标占位机制，没有命令行参数可预设；当前动画窗口会盖住这段过程，实际看到界面时已是黑鲸图标。彻底隐藏需要 Win32 控制窗口显隐，可能引起页面节流、拖慢启动，暂不实现。
+浏览器 `--app` 窗口创建时，任务栏按钮先使用浏览器进程自带图标，页面 `favicon`（黑鲸）加载完成后才切换，因此会出现极短暂的一闪。这是浏览器自身的图标占位机制，没有命令行参数可预设。启动器不设覆盖层，该一闪在浏览器冷启动阶段会短暂可见。彻底隐藏需要 Win32 控制窗口显隐，可能引起页面节流、拖慢启动，暂不实现。
 
 ### 2. 启动有一定等待时间
-启动时长主要来自：`dsh web` 服务引导 + 浏览器冷启动 + 前端插件装载。动画会覆盖全部等待过程并持续到 GUI 就绪，属于“可见但不可压缩”的时间。首次运行、杀毒软件实时扫描、机械硬盘会进一步加长。可通过 WPF 描边速度（见上）让动画与等待时长更匹配。
+启动时长主要来自：`dsh web` 服务引导 + 浏览器冷启动 + 前端插件装载，动画会覆盖绝大多数等待过程并持续到 GUI 就绪，属于“可见但基本不可压缩”的时间。首次运行、杀毒软件实时扫描、机械硬盘会进一步加长。启动器自身的路径解析已缓存（`resolved.cache`）且最早预热浏览器，能显著缩短总时长；动画节奏可在 `splash.html` 的 CSS 里调节。
 
 ### 3. SmartScreen / 安全软件可能误报（未签名 exe）
 本程序会启动隐藏进程、结束后台进程、复制文件，这类“类管理工具”行为可能触发启发式防护（例如卡巴斯基 PDM:Trojan.Win32.Generic 对旧版 PowerShell 脚本的误报）。建议：
@@ -157,8 +156,8 @@ DSH-GUI.exe --selftest
 ### 5. 同源预加载依赖 dist 写入权限
 启动器需要把 `splash.html` 等素材复制到 npm 全局的 `dsh-web-frontend/dist` 目录。若该目录不可写，会自动退回“文件页动画 → 就绪后直接跳转 GUI”模式（素材内嵌于 exe，此模式下自动释放到 `%LocalAppData%\DSH-GUI\assets`），此时会短暂看到官方 HARNESS 加载页。
 
-### 6. 就绪判定依赖标题
-WPF 以浏览器窗口标题包含 `DeepSeek Harness` 判定 GUI 就绪；若官方前端修改标题结构，可能需要同步更新 `SplashWindow.AppTitle`。
+### 6. 就绪判定依赖官方启动卡片
+浏览器 splash 以同源 iframe 里官方启动卡片（`_boot_*` class）消失判定 GUI 就绪；若官方前端改了启动卡片的 class 结构，可能需要同步更新 `splash.html` 里的 `appReady()` 判定。
 
 ## 许可证
 
