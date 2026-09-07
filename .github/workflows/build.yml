@@ -12,6 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Fetch WebView2 SDK (NuGet)
+        shell: pwsh
+        run: |
+          $ver="1.0.4191.47"
+          $pk="packages\ms.webview2"; New-Item -ItemType Directory -Force -Path "$pk\bin" | Out-Null
+          Invoke-WebRequest "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$ver/microsoft.web.webview2.$ver.nupkg" -OutFile "$pk\wv2.nupkg"
+          Expand-Archive "$pk\wv2.nupkg" -DestinationPath "$pk\pkg" -Force
+          Copy-Item "$pk\pkg\lib\net462\Microsoft.Web.WebView2.Core.dll","$pk\pkg\lib\net462\Microsoft.Web.WebView2.Wpf.dll","$pk\pkg\runtimes\win-x64\native\WebView2Loader.dll" "$pk\bin\"
+
       - name: Build DSH-GUI.exe
         shell: cmd
         run: build.cmd
