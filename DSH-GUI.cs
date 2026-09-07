@@ -1,19 +1,36 @@
 // DSH GUI 一键式启动器（C#，无需 PowerShell）
-// 双击即打开浏览器 --app 窗口播放 splash 动画（唯一启动画布）；后台启动 dsh web；
-// 服务就绪后把 token 写入 token.js，预热页读到后原地跳到同源 splash，加载真实 GUI 后揭示；关闭窗口停服务。
-// 开源友好：单个 .cs 文件即可用 Windows 自带 csc.exe 编译。
+// WebView2 宿主版：不再丢给 Chrome，而是启动器自己开一个窗口（自绘标题栏 + 黑鲸图标），
+// 内嵌 WebView2 渲染 splash 动画与真实 GUI。窗口是启动器自己的：
+//   - 任务栏图标从窗口出现那一刻就是黑鲸（不再闪 Chrome/Edge 默认图标）；
+//   - 标题栏颜色可完全自定义（随 dsh 外观偏好深浅色）。
+// 后台拉起 dsh web；服务就绪后写入 token.js，splash 自我跳转到同源 GUI；关闭窗口停服务。
+// 开源友好：单个 .cs 文件即可用 Windows 自带 csc.exe 编译（需引用嵌入式 WebView2 SDK）。
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Management;
+using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Shapes;
+using System.Windows.Shell;
+using WPath = System.Windows.Shapes.Path;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using IOPath = System.IO.Path;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
 
 namespace DshGui
 {
@@ -28,11 +45,14 @@ namespace DshGui
 
         internal static readonly string AppDir = AppDomain.CurrentDomain.BaseDirectory;
         static readonly string BaseDir = IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DSH-GUI");
-        static readonly string ProfileDir = IOPath.Combine(BaseDir, "profile");
         static readonly string LogFile = IOPath.Combine(BaseDir, "launcher.log");
         static readonly string ServerOut = IOPath.Combine(BaseDir, "server.out.log");
         static readonly string ServerErr = IOPath.Combine(BaseDir, "server.err.log");
         static readonly string LockFile = IOPath.Combine(BaseDir, "owner.lock");
+
+        // WebView2 运行时：SDK 托管 DLL 与原生 loader 内嵌于 exe，启动时释放到 bin 目录并加载
+        static readonly string Wv2BinDir = IOPath.Combine(BaseDir, "bin");
+        internal static readonly string Wv2UserDataFolder = IOPath.Combine(BaseDir, "webview2");
 
         static string NpmRoot = "";
         static string DshBin = "";
@@ -43,10 +63,8 @@ namespace DshGui
         static bool NoOpenSupported = false;
         static string LastServerError = null;
         static int ExitCode = 0;
-        static double WinW = 1100;
-        static double WinH = 720;
-        static int WinLeft = 0;
-        static int WinTop = 0;
+        internal static double WinW = 1100;
+        internal static double WinH = 720;
 
         // dsh 用户数据根目录：$DSH_HOME > ~/.dsh，与 dsh-home-paths 的 resolveDshHome 保持一致
         static string DshHomePath()
@@ -127,26 +145,38 @@ namespace DshGui
             {
                 Directory.CreateDirectory(BaseDir);
                 LoadConfig();
-                Log("start, version 1.4.0 (browser-splash mode)");
+                SetupWv2Runtime();
+                Log("start, version 2.0.0 (webview2 host)");
+
+                var app = new Application();
+                var win = new DshWindow();
 
                 if (PortOpen())
                 {
                     Log("port already open, open GUI directly");
-                    OpenBrowser(Url, false);
-                    return 0;
+                    win.Navigate(Url);
+                    app.Run(win);
+                    return ExitCode;
                 }
 
-                // 不用 WPF 动画窗口——浏览器 splash 动画就是唯一的启动画布（浏览器现在启动快，避免双窗口抢层级）。
-                // 这里只计算浏览器 --app 窗口的居中几何。
-                Rect wa = SystemParameters.WorkArea;
-                WinLeft = (int)(wa.Left + (wa.Width - WinW) / 2);
-                WinTop = (int)(wa.Top + (wa.Height - WinH) / 2);
+                // 端口空闲：用 WebView2 播放 file:// splash，后台拉起 dsh web。
+                // 先删掉上一轮遗留的 token.js：splash 从加载起就高频轮询它，若不删，
+                // 会在服务就绪前读到旧 token 并带着它跳转（旧 token 在新服务上被拒 → 404）。
+                try { File.Delete(IOPath.Combine(SplashDir(), "token.js")); } catch { }
+                // splash(wait=token) 轮询同目录 token.js，服务就绪+token 到手后原地跳到同源 GUI（单窗口、无缝）。
+                win.Navigate(FileSplashUrl("0") + "&wait=token");
+                Log("navigated to splash");
 
-                // 后台线程负责启动编排；主线程阻塞等它结束（浏览器 GUI 窗口关闭即结束，结束即退出）。
-                Thread worker = new Thread(LauncherWorker);
+                var closeEvt = new ManualResetEvent(false);
+                win.Closed += (s, e) => { try { closeEvt.Set(); } catch { } };
+
+                Thread worker = new Thread(() => LauncherWorker(win, closeEvt));
                 worker.IsBackground = true;
                 worker.Start();
-                worker.Join();
+
+                app.Run(win);
+                try { closeEvt.Set(); } catch { }
+                try { worker.Join(6000); } catch { }
                 return ExitCode;
             }
             catch (Exception ex)
@@ -157,7 +187,55 @@ namespace DshGui
             }
         }
 
-        static void LauncherWorker()
+        // 释放内嵌的 WebView2 SDK（托管 DLL + 原生 loader）到 bin 目录并挂载：
+        // SetDllDirectory 让原生 WebView2Loader.dll 可被找到；AssemblyResolve 让托管 Core/Wpf 从 bin 加载。
+        static void SetupWv2Runtime()
+        {
+            try
+            {
+                Directory.CreateDirectory(Wv2BinDir);
+                string[][] map = new[] {
+                    new[] { "DshGui.Wv2Core", "Microsoft.Web.WebView2.Core.dll" },
+                    new[] { "DshGui.Wv2Wpf", "Microsoft.Web.WebView2.Wpf.dll" },
+                    new[] { "DshGui.Wv2Loader", "WebView2Loader.dll" }
+                };
+                foreach (var pair in map)
+                {
+                    string dest = IOPath.Combine(Wv2BinDir, pair[1]);
+                    if (!File.Exists(dest))
+                    {
+                        using (Stream s = typeof(Program).Assembly.GetManifestResourceStream(pair[0]))
+                        {
+                            if (s != null) using (FileStream fs = new FileStream(dest, FileMode.Create, FileAccess.Write)) s.CopyTo(fs);
+                        }
+                    }
+                }
+                SetDllDirectory(Wv2BinDir);
+                AppDomain.CurrentDomain.AssemblyResolve += delegate (object o, ResolveEventArgs e)
+                {
+                    string simple = new AssemblyName(e.Name).Name + ".dll";
+                    string p = IOPath.Combine(Wv2BinDir, simple);
+                    return File.Exists(p) ? Assembly.LoadFrom(p) : null;
+                };
+                // 清理自愈（E_ABORT 换新目录）遗留的旧 profile 目录，避免堆积
+                try
+                {
+                    string parent = IOPath.GetDirectoryName(Wv2UserDataFolder);
+                    foreach (string d in Directory.GetDirectories(parent, "webview2-*"))
+                    {
+                        try { Directory.Delete(d, true); } catch { }
+                    }
+                }
+                catch { }
+                Log("webview2 sdk ready at " + Wv2BinDir);
+            }
+            catch (Exception ex) { Log("webview2 setup failed: " + ex.Message); }
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern bool SetDllDirectory(string lpPathName);
+
+        static void LauncherWorker(DshWindow win, ManualResetEvent closeEvt)
         {
             Stopwatch sw = Stopwatch.StartNew();
             try
@@ -179,37 +257,28 @@ namespace DshGui
 
                 if (File.Exists(LockFile))
                 {
-                    // 另一实例正在启动服务：等它就绪即可——owner 的唯一预热窗会自动跳到同源 GUI，
-                    // 这里不再开第二个窗口，避免重复。
+                    // 另一实例正在启动服务：等它就绪——本窗口直接打开同源 GUI（不重复启动服务器）
                     Log("another instance is starting the server");
                     bool ready = WaitPort(90);
                     if (!ready)
                     {
                         UiMessage("DSH web 服务未能就绪，请重试。", "DSH GUI", MessageBoxImage.Warning);
+                        CloseUi(win);
                         FinishApp(1);
                         return;
                     }
-                    // 等它把 token 写入共享 ServerOut（token.js 由 owner 写，本进程无需再开窗口）
                     WaitLaunchToken(15);
+                    Log("owner ready, open GUI directly");
+                    StartUi(win, delegate { win.Navigate(SplashTarget()); });
+                    closeEvt.WaitOne();
                     FinishApp(0);
                     return;
                 }
 
-                // 轮换服务输出日志：本轮启动只保留本次 run 的行，
-                // 防止把上一次 run 残留的 token 行误认成当前服务的 token。
-                // 必须在写 owner 锁之前清空：等锁的其它实例从共享日志扫 token 时才不会读到旧行。
+                // 轮换服务输出日志：本轮启动只保留本次 run 的行，防止上次 token 残留
                 try { File.WriteAllText(ServerOut, ""); } catch { }
                 File.WriteAllText(LockFile, Process.GetCurrentProcess().Id.ToString());
                 Log("starting dsh web");
-
-                // 尽早打开 file:// splash 预热浏览器，让浏览器冷启动与下面的 dsh 求解 / 服务 boot 重叠（省 1~3s）。
-                // wait=token：这个窗口是唯一窗口，轮询同目录 token.js，读到 token 后原地自跳转到同源 splash。
-                // 先删掉上一轮遗留的 token.js，避免预热页读到旧进程的失效 token（token 是每进程一次的）。
-                try { File.Delete(IOPath.Combine(SplashDir(), "token.js")); } catch { }
-                string prewarmUrl = FileSplashUrl("0") + "&wait=token";
-                Log("prewarm browser: " + sw.ElapsedMilliseconds + "ms -> " + prewarmUrl);
-                OpenBrowser(prewarmUrl, true);
-                Log("browser spawned: " + sw.ElapsedMilliseconds + "ms");
 
                 ResolveDshInstall();
                 Log("resolve dsh install: " + sw.ElapsedMilliseconds + "ms");
@@ -219,9 +288,9 @@ namespace DshGui
                 Process server = StartServer();
                 if (server == null)
                 {
-                    KillBrowser();
                     UiMessage(LastServerError ?? "无法启动 dsh web（node 或 dsh 未找到）。", "DSH GUI", MessageBoxImage.Error);
                     try { File.Delete(LockFile); } catch { }
+                    CloseUi(win);
                     FinishApp(1);
                     return;
                 }
@@ -230,24 +299,43 @@ namespace DshGui
                 if (!WaitPort(90))
                 {
                     UiMessage("DSH web 服务 90 秒内未就绪，请查看日志：" + ServerErr, "DSH GUI", MessageBoxImage.Error);
-                    KillBrowser();
                     KillTree(server.Id);
                     try { File.Delete(LockFile); } catch { }
+                    CloseUi(win);
                     FinishApp(1);
                     return;
                 }
                 Log("server ready: " + sw.ElapsedMilliseconds + "ms");
 
-                // 等 token 行落盘(最久 15 秒)
                 WaitLaunchToken(15);
 
-                // 服务就绪 + token 到手：把 token 写进 splash 同目录的 token.js。
-                // 预热窗（唯一窗口）轮询到后原地跳到带 token 的同源 splash——单窗口自跳转，不再"关一个开一个"。
-                WriteLaunchTokenJs();
-                Log("token.js written: " + sw.ElapsedMilliseconds + "ms");
+                // 启动器自己完成 token→cookie 交换：GET /?token=X → 303 + Set-Cookie（不跟随重定向）。
+                // 轮询期间反复用 ServerOut 里的最新 token 重试，插件树重载导致的 token 轮换也能覆盖。
+                // 这样 WebView2 全程不需要碰 token（token 是一次性/进程绑定的，交给页面容易失效）。
+                if (ExchangeSessionToken(30)) Log("session cookie exchanged: " + sw.ElapsedMilliseconds + "ms");
+                else Log("WARNING: session cookie not exchanged in 30s");
+
+                // 带 cookie 拿一次 index（200 = 静态 fallback 已就绪），确认 WebView2 跳转必然成功
+                if (WaitIndexWithCookie(30)) Log("index ready with cookie: " + sw.ElapsedMilliseconds + "ms");
+                else Log("WARNING: index not ready with cookie in 30s");
+
+                // 把会话 cookie 注入 WebView2，再导航到干净的 GUI 根路径（splash 只负责动画，不再自跳转）
+                if (!string.IsNullOrEmpty(SessionCookieName) && !string.IsNullOrEmpty(SessionCookieValue))
+                {
+                    StartUi(win, delegate { win.SetSessionCookie(SessionCookieName, SessionCookieValue); });
+                    // 跳转到“服务端 splash（hold 终态）”：画面与 file:// 动画终态一致，无缝衔接；
+                    // 它用隐藏 iframe 预加载真实 GUI（官方 Loading 页不露脸），_boot_ 卡消失后淡出揭示。
+                    StartUi(win, delegate { win.Navigate(ServedSplashUrl()); });
+                    Log("gui navigation triggered: " + sw.ElapsedMilliseconds + "ms");
+                }
+                else
+                {
+                    Log("no session cookie; fallback to token.js flow");
+                    WriteLaunchTokenJs();
+                }
 
                 // 窗口关闭后停止本次启动的服务
-                while (GuiBrowserAlive()) Thread.Sleep(1000);
+                closeEvt.WaitOne();
                 Log("window closed, stopping server");
                 KillTree(server.Id);
                 try { File.Delete(LockFile); } catch { }
@@ -256,15 +344,25 @@ namespace DshGui
             catch (Exception ex)
             {
                 Log("ERROR: " + ex);
-                KillBrowser();
-                UiMessage("DSH GUI 启动失败：\n" + ex.Message, "DSH GUI", MessageBoxImage.Error);
+                CloseUi(win);
                 FinishApp(1);
             }
         }
 
+        // 跨线程把动作调度到 UI 线程执行
+        static void StartUi(DshWindow win, Action act)
+        {
+            try { win.Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() => { try { act(); } catch { } })); }
+            catch { }
+        }
+
+        static void CloseUi(DshWindow win)
+        {
+            StartUi(win, delegate { if (win != null) win.Close(); });
+        }
+
         static void UiMessage(string text, string caption, MessageBoxImage image)
         {
-            // 无 WPF 消息循环：直接从工作线程弹 MessageBox（Win32 对话框，可在非 UI 线程显示）
             try { MessageBox.Show(text, caption, MessageBoxButton.OK, image); }
             catch (Exception ex) { Log("message failed: " + ex.Message); }
         }
@@ -272,7 +370,6 @@ namespace DshGui
         static void FinishApp(int code)
         {
             ExitCode = code;
-            // 无 WPF 消息循环：退出码由 Main 的 worker.Join() 返回（写后 Join 建立 happens-before）
         }
 
         static bool PortOpen()
@@ -300,43 +397,108 @@ namespace DshGui
             return false;
         }
 
-        static string FindBrowser()
+        static string SessionCookieName = "";
+        static string SessionCookieValue = "";
+
+        // 用最新 token 换取会话 cookie：GET /?token=X → 303 + Set-Cookie（不跟随）。
+        // 每次循环都从 ServerOut 重扫最新 "dsh web:" 行（插件重载会轮换 token），拿到 303 即成功。
+        static bool ExchangeSessionToken(int seconds)
         {
-            string[] candidates = {
-                IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Google\\Chrome\\Application\\chrome.exe"),
-                IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Google\\Chrome\\Application\\chrome.exe"),
-                IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google\\Chrome\\Application\\chrome.exe"),
-                IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft\\Edge\\Application\\msedge.exe"),
-                IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft\\Edge\\Application\\msedge.exe")
-            };
-            foreach (string p in candidates) if (File.Exists(p)) return p;
-            return null;
+            for (int i = 0; i < seconds * 2; i++)
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(LaunchToken))
+                    {
+                        foreach (string line in File.ReadLines(ServerOut)) ExtractLaunchToken(line);
+                    }
+                    if (!string.IsNullOrEmpty(LaunchToken))
+                    {
+                        HttpWebRequest req = (HttpWebRequest)WebRequest.Create(Url + "/?token=" + Uri.EscapeDataString(LaunchToken));
+                        req.Method = "GET";
+                        req.Timeout = 1100;
+                        req.UserAgent = "DSH-GUI";
+                        req.AllowAutoRedirect = false;
+                        using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                        {
+                            if (resp.StatusCode == HttpStatusCode.SeeOther)
+                            {
+                                string setCookie = resp.Headers["Set-Cookie"];
+                                if (!string.IsNullOrEmpty(setCookie))
+                                {
+                                    int eq = setCookie.IndexOf('=');
+                                    int sc = setCookie.IndexOf(';');
+                                    if (eq > 0)
+                                    {
+                                        SessionCookieName = setCookie.Substring(0, eq).Trim();
+                                        SessionCookieValue = (sc > eq ? setCookie.Substring(eq + 1, sc - eq - 1) : setCookie.Substring(eq + 1)).Trim();
+                                        Log("session cookie: " + SessionCookieName);
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (WebException wx)
+                {
+                    HttpWebResponse r = wx.Response as HttpWebResponse;
+                    if (r != null)
+                    {
+                        // 401 = 认证层已就绪但 token 不匹配（可能已轮换）→ 重扫新 token 重试
+                        if ((int)r.StatusCode != 401) { Thread.Sleep(300); continue; }
+                    }
+                }
+                catch { }
+                Thread.Sleep(300);
+            }
+            return false;
         }
 
-        static void OpenBrowser(string targetUrl, bool useSplashGeometry)
+        // 带已交换的 cookie 拿 index：200 = 认证 + 静态 fallback 都已就绪（WebView2 注入 cookie 后同此链）。
+        static bool WaitIndexWithCookie(int seconds)
         {
-            string browser = FindBrowser();
-            if (browser == null)
+            for (int i = 0; i < seconds * 2; i++)
             {
-                Process.Start(new ProcessStartInfo(Url) { UseShellExecute = true });
-                return;
+                try
+                {
+                    if (string.IsNullOrEmpty(SessionCookieName) || string.IsNullOrEmpty(SessionCookieValue)) { Thread.Sleep(300); continue; }
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(Url + "/");
+                    req.Method = "GET";
+                    req.Timeout = 900;
+                    req.UserAgent = "DSH-GUI";
+                    req.AllowAutoRedirect = true;
+                    CookieContainer cc = new CookieContainer();
+                    cc.Add(new Cookie(SessionCookieName, SessionCookieValue, "/", "127.0.0.1"));
+                    req.CookieContainer = cc;
+                    using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                    {
+                        if (resp.StatusCode == HttpStatusCode.OK) return true;
+                    }
+                }
+                catch (WebException wx)
+                {
+                    HttpWebResponse r = wx.Response as HttpWebResponse;
+                    if (r != null && r.StatusCode == HttpStatusCode.OK) return true;
+                }
+                catch { }
+                Thread.Sleep(400);
             }
-            string args = "--app=\"" + targetUrl + "\" --user-data-dir=\"" + ProfileDir +
-                "\" --no-first-run --no-default-browser-check --disable-background-mode --disable-session-crashed-bubble";
-            if (useSplashGeometry)
-            {
-                // 与预热 splash 窗口保持同一尺寸与位置，交接时画面完全重叠
-                args += " --window-size=" + (int)WinW + "," + (int)WinH +
-                        " --window-position=" + WinLeft + "," + WinTop;
-            }
-            Log("open window: " + targetUrl);
-            Process.Start(new ProcessStartInfo(browser, args) { UseShellExecute = false, CreateNoWindow = true });
+            return false;
         }
+
+
 
         // splash 跳转目标:alpha.3+ 首次进入带 token(服务端换 cookie 后 303 回干净路径),无 token 时退回原行为
         static string SplashTarget()
         {
             return LaunchToken == null ? Url : Url + "?token=" + LaunchToken;
+        }
+
+        // 服务端 splash（hold 终态）：与 file:// 动画终态同款画面，隐藏 iframe 预加载真实 GUI（无 token，cookie 已注入）
+        static string ServedSplashUrl()
+        {
+            return Url + "/splash.html?hold=1&timeout=60&target=" + Uri.EscapeDataString(Url) + ThemeQuery();
         }
 
         static string FileSplashUrl(string handoff)
@@ -391,8 +553,7 @@ namespace DshGui
 
         static string ResolveNpmRoot()
         {
-            // 先探测常见全局目录（秒级，避免每次启动都 spawn `npm root -g`——npm 启动慢且可能被杀软扫描）。
-            // 找不到才用 npm root -g 兜底。
+            // 先探测常见全局目录（秒级，避免每次启动都 spawn `npm root -g`）。
             string[] candidates = {
                 IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "npm", "node_modules"),
                 IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node_modules"),
@@ -414,8 +575,6 @@ namespace DshGui
 
         static void ResolveDshInstall()
         {
-            // 命中缓存直接复用，把这段从 1.8~26.8s 压到 ~0ms。
-            // 升级 dsh 后删除 %LocalAppData%\DSH-GUI\resolved.cache 即重算。
             if (TryLoadResolveCache()) return;
             try
             {
@@ -425,9 +584,6 @@ namespace DshGui
                 if (!File.Exists(DshBin)) throw new Exception("dsh bin missing: " + DshBin);
 
                 string node = ResolveNodeExe();
-                // dsh >= 0.1.0-rc.7 默认会自动打开系统浏览器；用 --no-open 关掉，
-                // 避免和我们自己打开的 Chrome --app 窗口重复。
-                // 两个独立的 node 探测并行跑，减少串行等待。
                 var tNoOpen = Task.Factory.StartNew<bool>(delegate
                 {
                     try
@@ -495,7 +651,6 @@ namespace DshGui
                 if (!map.TryGetValue("dshBin", out db) || string.IsNullOrEmpty(db) || !File.Exists(db)) return false;
                 if (!map.TryGetValue("distDir", out dd) || string.IsNullOrEmpty(dd) || !Directory.Exists(dd)) return false;
                 NodeExe = map.ContainsKey("node") && !string.IsNullOrEmpty(map["node"]) ? map["node"] : "node";
-                // 缓存的绝对 node 路径已失效（升级/卸载）则作废缓存重算
                 if (NodeExe.IndexOf(IOPath.DirectorySeparatorChar) >= 0 && !File.Exists(NodeExe)) return false;
                 NoOpenSupported = map.ContainsKey("noOpen") && map["noOpen"] == "1";
                 NpmRoot = nm;
@@ -572,7 +727,6 @@ namespace DshGui
         }
 
         // alpha.3+ 的 dsh web 会打印 "dsh web: http://127.0.0.1:3080/?token=xxx";
-        // 截取 token(已 URL 编码)供 splash target 注入。旧版 dsh 无此行,保持 null 走原路径。
         static void ExtractLaunchToken(string line)
         {
             if (LaunchToken != null || line == null) return;
@@ -595,8 +749,6 @@ namespace DshGui
             }
         }
 
-        // 端口就绪后 token 行可能稍后才打印(树收敛后输出);轮询等待,最长 seconds 秒。
-        // 另一实例启动服务时本进程不捕获其 stdout,从共享的 ServerOut 日志读。
         static void WaitLaunchToken(int seconds)
         {
             for (int i = 0; i < seconds * 5 && LaunchToken == null; i++)
@@ -612,7 +764,6 @@ namespace DshGui
             if (LaunchToken == null) Log("launch token not seen (older dsh without token auth?)");
         }
 
-        // 把 token 写成 splash 同目录的 token.js；预热窗(唯一窗口)轮询到后原地自跳到带 token 的同源 splash。
         static void WriteLaunchTokenJs()
         {
             try
@@ -647,54 +798,6 @@ namespace DshGui
             catch (Exception ex) { Log("kill failed: " + ex.Message); }
         }
 
-        static void KillBrowser()
-        {
-            try
-            {
-                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-                    "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='msedge.exe' OR Name='chrome.exe'"))
-                {
-                    foreach (ManagementObject mo in searcher.Get())
-                    {
-                        string cl = mo["CommandLine"] as string;
-                        if (cl != null && cl.Contains("DSH-GUI"))
-                        {
-                            uint pid = (uint)mo["ProcessId"];
-                            try
-                            {
-                                ProcessStartInfo psi = new ProcessStartInfo("taskkill.exe", "/PID " + pid + " /T /F");
-                                psi.CreateNoWindow = true;
-                                psi.UseShellExecute = false;
-                                psi.WindowStyle = ProcessWindowStyle.Hidden;
-                                using (Process p = Process.Start(psi)) { p.WaitForExit(3000); }
-                            }
-                            catch { }
-                        }
-                    }
-                }
-                Log("stopped prewarmed browser");
-            }
-            catch (Exception ex) { Log("kill browser failed: " + ex.Message); }
-        }
-
-        static bool GuiBrowserAlive()
-        {
-            try
-            {
-                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-                    "SELECT CommandLine FROM Win32_Process WHERE Name='msedge.exe' OR Name='chrome.exe'"))
-                {
-                    foreach (ManagementObject mo in searcher.Get())
-                    {
-                        string cl = mo["CommandLine"] as string;
-                        if (cl != null && cl.Contains("DSH-GUI")) return true;
-                    }
-                }
-            }
-            catch { }
-            return false;
-        }
-
         internal static void Log(string message)
         {
             try
@@ -709,7 +812,6 @@ namespace DshGui
             StringBuilder sb = new StringBuilder();
             try
             {
-                // 校验内嵌素材可读取（WPF 几何解析已移除，只核对素材字节数）
                 sb.AppendLine("splash.html=" + Assets.ReadText("splash.html").Length + "B, deepseek-wordmark.svg=" + Assets.ReadText("deepseek-wordmark.svg").Length + "B");
                 sb.AppendLine("embedded resources: " + string.Join(",", typeof(Program).Assembly.GetManifestResourceNames()));
                 ResolveDshInstall();
@@ -718,6 +820,9 @@ namespace DshGui
                 if (string.IsNullOrEmpty(DshBin) || !File.Exists(DshBin))
                     sb.AppendLine("WARNING: dsh 未找到（npm root -g 解析失败）；请确认已执行 npm install -g @deepseek-ai/dsh");
                 sb.AppendLine("dshTheme=" + ReadDshThemePreference());
+                sb.AppendLine("wv2 core=" + (typeof(Program).Assembly.GetManifestResourceStream("DshGui.Wv2Core") != null) +
+                    " wpf=" + (typeof(Program).Assembly.GetManifestResourceStream("DshGui.Wv2Wpf") != null) +
+                    " loader=" + (typeof(Program).Assembly.GetManifestResourceStream("DshGui.Wv2Loader") != null));
                 sb.AppendLine("selftest OK");
                 try { File.WriteAllText(IOPath.Combine(AppDir, "selftest.txt"), sb.ToString(), Encoding.UTF8); } catch { }
                 return 0;
@@ -729,6 +834,316 @@ namespace DshGui
                 return 1;
             }
         }
+    }
+
+    // 主窗口：自绘标题栏（随主题色）+ 黑鲸图标 + WebView2 内容区
+    public class DshWindow : Window
+    {
+        [DllImport("dwmapi.dll")]
+        static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int val, int size);
+        static readonly int DWMWA_CAPTION_COLOR = 25; // Win11 22H2+：非客户区标题栏填充色
+        static readonly int DWMWA_BORDER_COLOR = 34;  // Win11 22H2+：窗口边框线色
+
+        WebView2 web;
+        TextBlock _titleText;
+        string _pendingUrl;
+        Color _barColor = Color.FromRgb(0xd5, 0xe2, 0xff);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct POINT { public int X, Y; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct RECT { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct MINMAXINFO { public POINT ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize; }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public int dwFlags; }
+        [DllImport("user32.dll")]
+        static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+        [DllImport("user32.dll")]
+        static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO mi);
+
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            try
+            {
+                IntPtr h = new WindowInteropHelper(this).Handle;
+                if (h == IntPtr.Zero) return;
+                int colorref = (_barColor.B << 16) | (_barColor.G << 8) | _barColor.R;
+                DwmSetWindowAttribute(h, DWMWA_CAPTION_COLOR, ref colorref, 4);
+                DwmSetWindowAttribute(h, DWMWA_BORDER_COLOR, ref colorref, 4);
+
+                // 无边框窗口最大化时会超出屏幕约 7px（右侧被裁掉，右上角按钮"偏右/没显示完"）。
+                // 处理 WM_GETMINMAXINFO，把最大化尺寸约束到当前显示器的工作区。
+                HwndSource src = (HwndSource)HwndSource.FromVisual(this);
+                if (src != null) src.AddHook(WndProc);
+            }
+            catch { }
+        }
+
+        IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == 0x0024) // WM_GETMINMAXINFO
+            {
+                try
+                {
+                    MINMAXINFO mmi = (MINMAXINFO)Marshal.PtrToStructure(lParam, typeof(MINMAXINFO));
+                    IntPtr mon = MonitorFromWindow(hwnd, 2 /* MONITOR_DEFAULTTONEAREST */);
+                    if (mon != IntPtr.Zero)
+                    {
+                        MONITORINFO mi = new MONITORINFO();
+                        mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+                        if (GetMonitorInfo(mon, ref mi))
+                        {
+                            mmi.ptMaxPosition.X = mi.rcWork.Left;
+                            mmi.ptMaxPosition.Y = mi.rcWork.Top;
+                            mmi.ptMaxSize.X = mi.rcWork.Right - mi.rcWork.Left;
+                            mmi.ptMaxSize.Y = mi.rcWork.Bottom - mi.rcWork.Top;
+                            mmi.ptMaxTrackSize.X = mmi.ptMaxSize.X;
+                            mmi.ptMaxTrackSize.Y = mmi.ptMaxSize.Y;
+                            Marshal.StructureToPtr(mmi, lParam, false);
+                            handled = true;
+                        }
+                    }
+                }
+                catch { }
+            }
+            return IntPtr.Zero;
+        }
+
+        public DshWindow()
+        {
+            Title = "DeepSeek Harness";
+            Width = Program.WinW;
+            Height = Program.WinH;
+            MinWidth = 640;
+            MinHeight = 420;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.CanResize;
+            // WindowChrome 接管窗口外壳：取消非客户区（内容铺满到窗口边缘，无系统绘制的
+            // 钢蓝边框带），同时保留缩放手柄（ResizeBorderThickness）与标题栏拖拽（CaptionHeight）。
+            WindowChrome.SetWindowChrome(this, new WindowChrome
+            {
+                CaptionHeight = 36,
+                ResizeBorderThickness = new Thickness(6),
+                GlassFrameThickness = new Thickness(0, 0, 0, 1),
+                CornerRadius = new CornerRadius(0),
+                UseAeroCaptionButtons = false
+            });
+
+            try
+            {
+                using (Stream s = typeof(Program).Assembly.GetManifestResourceStream("DshGui.whale-black.ico"))
+                    if (s != null) Icon = BitmapFrame.Create(s);
+            }
+            catch { }
+
+            BuildLayout();
+            Loaded += DshWindow_Loaded;
+        }
+
+        public void Navigate(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return;
+            _pendingUrl = url;
+            try
+            {
+                if (web != null && web.CoreWebView2 != null && !string.IsNullOrEmpty(_pendingUrl))
+                    web.CoreWebView2.Navigate(_pendingUrl);
+            }
+            catch { }
+        }
+
+        // 注入启动器换来的会话 cookie（host-only @127.0.0.1），随后导航 / 即可通过认证
+        public void SetSessionCookie(string name, string value)
+        {
+            try
+            {
+                if (web == null || web.CoreWebView2 == null) return;
+                var cm = web.CoreWebView2.CookieManager;
+                var cookie = cm.CreateCookie(name, value, "127.0.0.1", "/");
+                cookie.SameSite = CoreWebView2CookieSameSiteKind.Strict;
+                cookie.Expires = DateTime.Now.AddDays(30);
+                cm.AddOrUpdateCookie(cookie);
+                Program.Log("session cookie injected into webview2");
+            }
+            catch (Exception ex) { Program.Log("cookie inject failed: " + ex.Message); }
+        }
+
+        string _initError = "";
+
+        async void DshWindow_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (web == null) return;
+            if (await InitAndNavigate(Program.Wv2UserDataFolder)) return;
+            // 自愈：环境创建被中止（0x80004004 E_ABORT）通常是因为用户数据目录被上次强制结束的实例残留占用。
+            // 换一个全新目录重试一次（token 每次启动都会重新认证，无需保留旧的 cookie）。
+            string fresh = Program.Wv2UserDataFolder + "-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            Program.Log("webview2 init failed (" + _initError + "), retry with fresh profile");
+            if (await InitAndNavigate(fresh))
+            {
+                Program.Log("webview2 init recovered (fresh profile)");
+                return;
+            }
+            Program.Log("webview2 init failed (retry too): " + _initError);
+            try { MessageBox.Show("WebView2 初始化失败（请确认已安装 Microsoft Edge WebView2 Runtime）：\n" + _initError, "DSH GUI", MessageBoxButton.OK, MessageBoxImage.Error); } catch { }
+            Close();
+        }
+
+        async Task<bool> InitAndNavigate(string folder)
+        {
+            try
+            {
+                CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(null, folder, null);
+                await web.EnsureCoreWebView2Async(env);
+                if (!string.IsNullOrEmpty(_pendingUrl))
+                    web.CoreWebView2.Navigate(_pendingUrl);
+                return true;
+            }
+            catch (Exception ex) { _initError = ex.Message; return false; }
+        }
+
+        void BuildLayout()
+        {
+            bool dark = Program.ReadDshThemePreference() != "light";
+            // 标题栏与 dsh web 侧边栏同色（--dsw-specific-sidebar-fill）：
+            // 浅色极浅灰 #f9fafb，深色 #1b1b1c（图标/文字为对比色）
+            Color barColor = dark ? Color.FromRgb(0x1b, 0x1b, 0x1c) : Color.FromRgb(0xf9, 0xfa, 0xfb);
+            _barColor = barColor; // 供 OnSourceInitialized 设置 DWM 边框色（与标题栏同色）
+            Color barText = dark ? Color.FromRgb(0xe7, 0xec, 0xff) : Color.FromRgb(0x1b, 0x2a, 0x5b);
+            Color hoverBg = dark ? Color.FromRgb(0x1a, 0x22, 0x3f) : Color.FromRgb(0xe4, 0xe8, 0xf2);
+            Color closeBg = Color.FromRgb(0xe8, 0x1e, 0x2f);
+            Background = new SolidColorBrush(barColor);
+
+            var grid = new Grid();
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            // ---- 自定义标题栏 ----
+            var titleBar = new Border();
+            titleBar.Background = new SolidColorBrush(barColor);
+            // 拖拽与双击最大化交给 WindowChrome（CaptionHeight 区域由系统原生处理）
+
+            var tb = new Grid();
+            tb.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            tb.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var left = new StackPanel();
+            left.Orientation = Orientation.Horizontal;
+            left.VerticalAlignment = VerticalAlignment.Center;
+            var logo = new Image();
+            try
+            {
+                using (Stream s = typeof(Program).Assembly.GetManifestResourceStream("DshGui.whale.png"))
+                    if (s != null) logo.Source = BitmapFrame.Create(s);
+                logo.Width = 18; logo.Height = 18;
+                logo.Margin = new Thickness(10, 0, 8, 0);
+                logo.VerticalAlignment = VerticalAlignment.Center;
+                logo.SnapsToDevicePixels = true;
+                RenderOptions.SetBitmapScalingMode(logo, BitmapScalingMode.HighQuality); // 高清缩放，避免发糊
+                left.Children.Add(logo);
+            }
+            catch { }
+
+            _titleText = new TextBlock();
+            _titleText.Text = "DeepSeek Harness";
+            _titleText.Foreground = new SolidColorBrush(barText);
+            _titleText.VerticalAlignment = VerticalAlignment.Center;
+            _titleText.Margin = new Thickness(0, 0, 0, 0);
+            _titleText.FontSize = 12;
+            left.Children.Add(_titleText);
+            Grid.SetColumn(left, 0);
+            tb.Children.Add(left);
+
+            var buttons = new StackPanel();
+            buttons.Orientation = Orientation.Horizontal;
+            buttons.HorizontalAlignment = HorizontalAlignment.Right;
+            Grid.SetColumn(buttons, 1);
+
+            // 三个按钮图标用矢量 Path 绘制：精确居中（不受字形底板影响）、任意缩放清晰
+            buttons.Children.Add(MakeTitleButton(MakeGlyph("M2.5,7 L11.5,7"), barText, hoverBg, null,
+                delegate { WindowState = WindowState.Minimized; }));
+
+            WPath maxGlyph = MakeGlyph("M2,2 L12,2 L12,12 L2,12 Z");
+            buttons.Children.Add(MakeTitleButton(maxGlyph, barText, hoverBg, null, delegate
+            {
+                if (WindowState == WindowState.Maximized) WindowState = WindowState.Normal;
+                else WindowState = WindowState.Maximized;
+            }));
+            StateChanged += (s, e) => UpdateMaxGlyph(maxGlyph);
+            UpdateMaxGlyph(maxGlyph);
+
+            // 关闭按钮：平时与其他按钮同色，悬停时红底 + 白色图标（统一中有区分）
+            buttons.Children.Add(MakeTitleButton(MakeGlyph("M2.5,2.5 L11.5,11.5 M11.5,2.5 L2.5,11.5"), barText, closeBg,
+                Color.FromRgb(0xff, 0xff, 0xff), delegate { Close(); }));
+
+            tb.Children.Add(buttons);
+            titleBar.Child = tb;
+            Grid.SetRow(titleBar, 0);
+            grid.Children.Add(titleBar);
+
+            // ---- WebView2 内容区 ----
+            // 用户数据目录在 DshWindow_Loaded 里通过 CoreWebView2Environment.CreateAsync 显式指定（失败时可自愈换新目录）
+            web = new WebView2();
+            Grid.SetRow(web, 1);
+            grid.Children.Add(web);
+
+            Content = grid;
+        }
+
+        // 画一个 14x14 视框的矢量图标（Stroke 由调用方设置）
+        WPath MakeGlyph(string data)
+        {
+            var p = new WPath();
+            p.Data = Geometry.Parse(data);
+            p.Width = 14;
+            p.Height = 14;
+            p.StrokeThickness = 1.4;
+            p.StrokeStartLineCap = PenLineCap.Square;
+            p.StrokeEndLineCap = PenLineCap.Square;
+            p.StrokeLineJoin = PenLineJoin.Miter;
+            p.HorizontalAlignment = HorizontalAlignment.Center;
+            p.VerticalAlignment = VerticalAlignment.Center;
+            return p;
+        }
+
+        // 最大化/还原图标随窗口状态切换：最大化时显示“双框重叠”（还原），否则显示单框（最大化）
+        void UpdateMaxGlyph(WPath g)
+        {
+            if (WindowState == WindowState.Maximized)
+                g.Data = Geometry.Parse("M5,1.5 L12.5,1.5 L12.5,9 M3.5,5 L10.5,5 L10.5,12.5 L3.5,12.5 Z");
+            else
+                g.Data = Geometry.Parse("M2,2 L12,2 L12,12 L2,12 Z");
+        }
+
+        Border MakeTitleButton(WPath glyph, Color glyphColor, Color hoverBg, Color? hoverGlyphColor, Action onClick)
+        {
+            // 扁平无边框；图标为矢量 Path（精确居中、任意缩放清晰）
+            var b = new Border();
+            WindowChrome.SetIsHitTestVisibleInChrome(b, true); // WindowChrome 标题栏内可点击区域
+            b.Width = 46;
+            b.Height = 36;
+            b.Background = Brushes.Transparent;
+            b.Cursor = Cursors.Hand;
+            glyph.Stroke = new SolidColorBrush(glyphColor);
+            b.Child = glyph;
+            // 按下时标记已处理，避免被 WindowChrome 当作标题栏拖拽
+            b.MouseLeftButtonDown += (s, e) => e.Handled = true;
+            b.MouseEnter += (s, e) =>
+            {
+                b.Background = new SolidColorBrush(hoverBg);
+                if (hoverGlyphColor.HasValue) glyph.Stroke = new SolidColorBrush(hoverGlyphColor.Value);
+            };
+            b.MouseLeave += (s, e) =>
+            {
+                b.Background = Brushes.Transparent;
+                glyph.Stroke = new SolidColorBrush(glyphColor);
+            };
+            b.MouseLeftButtonUp += (s, e) => onClick();
+            return b;
+        }
+
     }
 
     public static class Assets
@@ -760,7 +1175,6 @@ namespace DshGui
                 s.CopyTo(fs);
             }
         }
-
     }
 
 }

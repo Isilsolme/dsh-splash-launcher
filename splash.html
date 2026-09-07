@@ -354,17 +354,14 @@
   }
 
   if (waitToken) {
-    // 单窗口自跳转：轮询同目录 token.js，拿到 token 后原地跳到带 token 的同源 splash。
-    // token 本身就是"服务已就绪"的信号（启动器只在 WaitPort+WaitLaunchToken 成功后写入）。
+    // 单窗口自跳转：轮询同目录 token.js，拿到 token 后直接跳到带 token 的 GUI 根路径
+    // （服务端换 cookie 后 303 回干净路径）。不再经手 /splash.html 中间页——
+    // dsh 静态 fallback 的注册时机会让该页短暂 404，曾导致“动画后 404”的间歇性失败。
     var base0 = target.replace(/\/+$/, '');
     var navServed = function (token) {
       if (leaving) return;
       leaving = true;
-      var servedUrl = base0 + '/splash.html?hold=1&timeout=60'
-        + '&target=' + encodeURIComponent(target + '?token=' + encodeURIComponent(token))
-        + (drawLogo ? '&logo=draw' : '')
-        + (theme ? '&theme=' + encodeURIComponent(theme) : '');
-      location.replace(servedUrl);
+      location.replace(base0 + '/?token=' + encodeURIComponent(token));
     };
     var pollToken = function () {
       if (leaving) return;

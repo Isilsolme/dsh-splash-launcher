@@ -1,6 +1,6 @@
 @echo off
 rem DSH GUI launcher build script (no external toolchain needed, uses Windows built-in csc.exe)
-rem splash.html / svg / png assets are embedded into the exe as resources:
+rem splash.html / svg / png / WebView2 SDK / icon assets are embedded into the exe as resources:
 rem the built DSH-GUI.exe is fully self-contained (portable single file).
 rem Files with the same names next to the exe take precedence at runtime (custom splash).
 setlocal
@@ -10,17 +10,28 @@ if not exist "%FW%\csc.exe" (
   echo csc.exe not found in .NET Framework 4.x. Install .NET Framework 4.x or adjust FW path.
   exit /b 1
 )
+set WV2=%~dp0packages\ms.webview2\bin
+if not exist "%WV2%\Microsoft.Web.WebView2.Wpf.dll" (
+  echo WebView2 SDK dlls missing. Run the steps in README to fetch Microsoft.Web.WebView2 package into packages\ms.webview2\bin.
+  exit /b 1
+)
 "%FW%\csc.exe" /nologo /target:winexe /platform:anycpu /optimize+ ^
   /win32icon:"%~dp0icons\whale-black.ico" ^
   /resource:"%~dp0splash.html",DshGui.splash.html ^
   /resource:"%~dp0deepseek-wordmark.svg",DshGui.deepseek-wordmark.svg ^
   /resource:"%~dp0whale-anim.svg",DshGui.whale-anim.svg ^
   /resource:"%~dp0whale.png",DshGui.whale.png ^
+  /resource:"%~dp0icons\whale-black.ico",DshGui.whale-black.ico ^
+  /resource:"%WV2%\Microsoft.Web.WebView2.Core.dll",DshGui.Wv2Core ^
+  /resource:"%WV2%\Microsoft.Web.WebView2.Wpf.dll",DshGui.Wv2Wpf ^
+  /resource:"%WV2%\WebView2Loader.dll",DshGui.Wv2Loader ^
   /out:"%~dp0DSH-GUI.exe" ^
   /r:"%FW%\WPF\PresentationFramework.dll" ^
   /r:"%FW%\WPF\PresentationCore.dll" ^
   /r:"%FW%\WPF\WindowsBase.dll" ^
   /r:"%FW%\System.Xaml.dll" ^
   /r:"%FW%\System.Management.dll" ^
+  /r:"%WV2%\Microsoft.Web.WebView2.Core.dll" ^
+  /r:"%WV2%\Microsoft.Web.WebView2.Wpf.dll" ^
   "%~dp0DSH-GUI.cs"
 exit /b %errorlevel%
