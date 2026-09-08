@@ -1,6 +1,6 @@
 {
   "name": "dsh-splash-launcher",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "DSH Windows one-click launcher: opens the browser splash animation immediately, boots dsh web, and reveals the GUI when ready; also registers the desktop_launch agent tool.",
   "type": "module",
   "main": "lib/index.js",

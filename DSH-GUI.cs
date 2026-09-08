@@ -49,6 +49,8 @@ namespace DshGui
         static readonly string ServerOut = IOPath.Combine(BaseDir, "server.out.log");
         static readonly string ServerErr = IOPath.Combine(BaseDir, "server.err.log");
         static readonly string LockFile = IOPath.Combine(BaseDir, "owner.lock");
+        // 窗口形态记忆（只记“缩小 / 最大化”二选一，不记尺寸与位置）
+        static readonly string WindowStateFile = IOPath.Combine(BaseDir, "window.state");
 
         // WebView2 运行时：SDK 托管 DLL 与原生 loader 内嵌于 exe，启动时释放到 bin 目录并加载
         static readonly string Wv2BinDir = IOPath.Combine(BaseDir, "bin");
@@ -116,6 +118,42 @@ namespace DshGui
             return "&theme=" + Uri.EscapeDataString(ReadDshThemePreference());
         }
 
+        // ---- 窗口形态记忆：上次关闭是“缩小”还是“最大化”，下次启动直接按该形态打开 ----
+        // 只区分两态（默认缩小窗口 / 最大化），不记忆具体长宽与坐标；分屏、自定义尺寸一律按缩小态处理。
+        internal static bool ReadWindowMaximized()
+        {
+            try
+            {
+                if (!File.Exists(WindowStateFile)) return false;
+                string s = File.ReadAllText(WindowStateFile).Trim().ToLowerInvariant();
+                return s == "maximized" || s == "max";
+            }
+            catch { return false; }
+        }
+
+        internal static void SaveWindowMaximized(bool maximized)
+        {
+            try
+            {
+                Directory.CreateDirectory(BaseDir);
+                string s = maximized ? "maximized" : "normal";
+                File.WriteAllText(WindowStateFile, s, Encoding.UTF8);
+                Log("window state saved: " + s);
+            }
+            catch (Exception ex) { Log("save window state failed: " + ex.Message); }
+        }
+
+        internal static string WindowStateText()
+        {
+            try
+            {
+                if (!File.Exists(WindowStateFile)) return "(unset -> normal)";
+                string s = File.ReadAllText(WindowStateFile).Trim();
+                return s.Length == 0 ? "(empty -> normal)" : s;
+            }
+            catch { return "(unreadable -> normal)"; }
+        }
+
         static void LoadConfig()
         {
             // 工作目录：环境变量 DSH_GUI_WORKSPACE > 同目录 workspace.txt > %USERPROFILE%
@@ -146,7 +184,7 @@ namespace DshGui
                 Directory.CreateDirectory(BaseDir);
                 LoadConfig();
                 SetupWv2Runtime();
-                Log("start, version 2.0.0 (webview2 host)");
+                Log("start, version 2.0.1 (webview2 host)");
 
                 var app = new Application();
                 var win = new DshWindow();
@@ -820,6 +858,7 @@ namespace DshGui
                 if (string.IsNullOrEmpty(DshBin) || !File.Exists(DshBin))
                     sb.AppendLine("WARNING: dsh 未找到（npm root -g 解析失败）；请确认已执行 npm install -g @deepseek-ai/dsh");
                 sb.AppendLine("dshTheme=" + ReadDshThemePreference());
+                sb.AppendLine("windowState=" + WindowStateText() + " (" + WindowStateFile + ")");
                 sb.AppendLine("wv2 core=" + (typeof(Program).Assembly.GetManifestResourceStream("DshGui.Wv2Core") != null) +
                     " wpf=" + (typeof(Program).Assembly.GetManifestResourceStream("DshGui.Wv2Wpf") != null) +
                     " loader=" + (typeof(Program).Assembly.GetManifestResourceStream("DshGui.Wv2Loader") != null));
@@ -848,6 +887,8 @@ namespace DshGui
         TextBlock _titleText;
         string _pendingUrl;
         Color _barColor = Color.FromRgb(0xd5, 0xe2, 0xff);
+        // 最近一次“非最小化”的窗口形态：关闭时若处于最小化，用它回落（避免把最小化记成默认缩小）
+        WindowState _lastRestorableState = WindowState.Normal;
 
         [StructLayout(LayoutKind.Sequential)]
         struct POINT { public int X, Y; }
@@ -939,8 +980,15 @@ namespace DshGui
             }
             catch { }
 
+            // 还原上次关闭时的形态：只有“最大化”需要额外动作，其余一律按默认缩小窗口打开
+            _lastRestorableState = Program.ReadWindowMaximized() ? WindowState.Maximized : WindowState.Normal;
+            if (_lastRestorableState == WindowState.Maximized) WindowState = WindowState.Maximized;
+
             BuildLayout();
             Loaded += DshWindow_Loaded;
+            // 关闭时记忆形态：最小化状态下关闭则回落到最近一次非最小化形态
+            Closing += (s, e) => Program.SaveWindowMaximized(
+                (WindowState == WindowState.Minimized ? _lastRestorableState : WindowState) == WindowState.Maximized);
         }
 
         public void Navigate(string url)
@@ -1071,7 +1119,12 @@ namespace DshGui
                 if (WindowState == WindowState.Maximized) WindowState = WindowState.Normal;
                 else WindowState = WindowState.Maximized;
             }));
-            StateChanged += (s, e) => UpdateMaxGlyph(maxGlyph);
+            StateChanged += (s, e) =>
+            {
+                UpdateMaxGlyph(maxGlyph);
+                // 记录最近一次非最小化形态，供关闭时记忆
+                if (WindowState != WindowState.Minimized) _lastRestorableState = WindowState;
+            };
             UpdateMaxGlyph(maxGlyph);
 
             // 关闭按钮：平时与其他按钮同色，悬停时红底 + 白色图标（统一中有区分）

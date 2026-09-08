@@ -26,18 +26,17 @@ Produces a self-contained `DSH-GUI.exe` (black-whale icon, assets embedded as re
 
 - Windows 10/11
 - Node.js + global `npm install -g @deepseek-ai/dsh`
-- Microsoft Edge or Google Chrome
+- Microsoft Edge WebView2 Runtime (bundled with Windows 10/11 / Edge; [standalone installer](https://developer.microsoft.com/microsoft-edge/webview2/) if missing)
 
 ## Configuration
 
 - `DSH_GUI_WORKSPACE` env var, or a `workspace.txt` next to the exe — working directory for `dsh web` (default: your user profile `%USERPROFILE%`)
 - `DSH_GUI_PORT` — port (default `3080`)
+- Window form is remembered: if you close the window maximized, it reopens maximized next time (only normal/maximized — size and position are not stored; delete `%LocalAppData%\DSH-GUI\window.state` to reset to the default normal window).
 - Splash assets are embedded in the exe; drop the same-named files (`splash.html`, `*.svg`, `whale.png`) next to the exe to override them (custom splash, no rebuild needed).
 
 ## Known issues
 
-1. The taskbar briefly shows the Chrome/Edge default icon before the page favicon (black whale) loads; this is a browser-level placeholder and cannot be preset via command line.
-2. Startup takes a while (dsh boot + browser cold start + plugin loading). The animation covers the whole wait and only fades out when the GUI is ready.
-3. Unsigned launchers that start hidden processes / stop process trees may trigger SmartScreen or behavior-based antivirus heuristics; click "More info → Run anyway" on first run, add the folder to your AV exclusions, or code-sign the exe.
+1. Startup takes a while (dsh boot + browser cold start + plugin loading). The animation covers the whole wait and only fades out when the GUI is ready.
 
 See the Chinese [README](README.md) for full details. Code is MIT; brand assets derive from DeepSeek Harness (MIT, © 2026 DeepSeek).
