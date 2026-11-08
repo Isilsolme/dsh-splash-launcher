@@ -1,5 +1,9 @@
 # DSH GUI
 
+> **This project is archived and no longer maintained.**
+>
+> DSH now ships a fairly complete official client. The compatibility work this launcher did to stitch its splash animation onto the GUI — a self-drawn WebView2 host, hidden preloading, and reveal-on-ready — now only adds overhead: it just slows startup down. It will no longer track dsh releases and no longer accepts issues or pull requests. The code and past releases remain for reference.
+
 [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 A one-click Windows launcher for the DeepSeek Harness (`dsh`) Web GUI with a borderless WPF startup animation (stroke-by-stroke "HARNESS" lettering inspired by SPlayer-Next). It starts `dsh web` in the background, preloads the real GUI behind the animation, and fades into it only when the GUI is actually ready. Closing the window stops the service it started.

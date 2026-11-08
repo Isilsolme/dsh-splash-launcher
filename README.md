@@ -1,5 +1,9 @@
 # DSH GUI
 
+> **本项目已归档，停止维护。**
+>
+> DSH 已经推出较完善的官方客户端，本项目为了让启动动画与 GUI 无缝衔接所做的兼容（自绘 WebView2 宿主、隐藏预加载、就绪后揭示等）如今只剩副作用——**只会拖慢启动速度**，收益已不成立。因此不再跟进 dsh 版本，也不再接受 issue / PR。代码与历史 Releases 保留，仅供查阅。
+
 > DeepSeek Harness（dsh）Web GUI 的 Windows 一键启动器：双击即用**自绘标题栏 + WebView2 内嵌**的窗口播放 splash 动画作为唯一启动画布（任务栏图标从窗口出现那一刻就是黑鲸，不再闪 Chrome/Edge 默认图标；标题栏颜色随主题统一），后台拉起 `dsh web`，GUI 就绪后揭示；关闭窗口自动停服务。
 
 启动动画借鉴 [SPlayer-Next](https://github.com/SPlayer-Dev/SPlayer-Next) 的思路：SVG `stroke-dashoffset` “一笔一划”书写效果——鲸鱼 Logo 升起呼吸，`deepseek` 官方字标浮现，`HARNESS` 七个字母逐笔描边。
